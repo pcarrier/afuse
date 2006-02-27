@@ -1,0 +1,9 @@
+Version 0.1.1
+-------------
+* Backward compatibility with FUSE 2.3 (to 2.5).
+* Internal bug fixes.
+* Moved to SVN due to SourceForge CVS being perpetually broken.
+
+Version 0.1
+-----------
+* Initial release
