@@ -1,0 +1,68 @@
+CVS Build
+---------
+If you get afuse from CVS, run add-cruft.sh to generate the autotool crap.
+If your version of the autotools generates files not picked up in the 
+various .cvsignore files or the remove-cruft.sh script, and you have
+CVS write access please add them. Not that add-cruft.sh is likely
+to work on your system anyway as the autotools seem to do completely
+different things distro to distro.
+
+I really hate the way the autotools require all these stupid random
+files be created for operation and included in releases. Why can't it
+just be an actual program used to build source distributions based on
+the canonicalised config information?
+
+
+TODO
+----
+While it is basically usable, there are a huge number of things which need
+doing to afuse to make it a "good" project. Here are a list of some of
+these:
+
+* Support multi-threading - Internatal Data structures need to guarded
+  before we allow this.
+
+* Eliminate the proxying - In theory it should be possible for afuse
+  to mount filesystems within itself. However this seems to cause a
+  really nasty deadlock. It might be possible for this to work using
+  multi-threading or rebinding/moving mount points (needs changes to
+  fusermount).
+
+* Auto-unmounting on inactivity.
+
+* More complex automounting schemes
+  * Different commands based on regex's of virtual directories.
+  * Use a static list of automountable virtual directories.
+  * Scriptable multi-level virtual directory hierachy.
+
+* Refactoring
+  * Code should be split into multiple files (could be more efficient too).
+  * Some internal terminology can be confusing.
+  * alloca's should be converted to VLAs as alloca is non-portable.
+  * Code should in general be made more portable with the help of the
+    autotools.
+
+* More extensive documentation.
+
+* GUI for asking for interactive automounting. For example we could pop up
+  an X11 window, or switch to other VTs on a Liunx console. This needs some
+  thought to be implemented well, maybe it should be done with plug-ins/
+  scripts on a per FS basis.
+
+* Better debugging output.
+
+* Autotool'ed environemnt needs lots of work.
+
+* Exit on signal often isn't clean (directory should be unmounted)
+  (actually this seems to work with FUSE 2.3?)
+
+* Mouting can sometimes happen in silly situations, for example touching
+  a file in the afuse root will cause a filesystem of that filename
+  to be automounted. This does not seem to be avoidable in earlier
+  versions of FUSE (2.3 for example) as getattr is always called on
+  the virtual directory on any operation and if this fails the whole
+  operation is aborted.  So it is impossible to distinguish a getattr for
+  [non]-mounting operations.
+
+Hopefully I'll get to some of these things in my spare time, however
+if you're interested in helping jump on the mailing list at the SF page.
