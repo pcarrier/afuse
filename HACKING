@@ -28,7 +28,10 @@ these:
   multi-threading or rebinding/moving mount points (needs changes to
   fusermount).
 
-* Auto-unmounting on inactivity.
+* Timeout-based auto-unmounting after all files are closed.
+
+* Rather than umounting an FS to ensure directory changes are flushed,
+  it should be possible to flush a handle to the parent dir instead.
 
 * More complex automounting schemes
   * Different commands based on regex's of virtual directories.
@@ -44,10 +47,10 @@ these:
 
 * More extensive documentation.
 
-* GUI for asking for interactive automounting. For example we could pop up
+* GUI for interactive automounting. For example we could pop up
   an X11 window, or switch to other VTs on a Liunx console. This needs some
-  thought to be implemented well, maybe it should be done with plug-ins/
-  scripts on a per FS basis.
+  thought to be implemented well, maybe it should be done with plug-ins/ scripts
+  on a per FS basis.
 
 * Better debugging output.
 

@@ -38,34 +38,21 @@
 #include <sys/xattr.h>
 #endif
 
-// When closing an fd/dir, the close may fail due to a signal
-// this value defines how many times we retry in this case.
-// It's useful to try and close as many fd's as possible
-// for the proxied fs to increase the chance an umount will
-// succeed.
-#define CLOSE_MAX_RETRIES 5
+#include "fd_list.h"
+#include "dir_list.h"
+#include "utils.h"
 
 #define TMP_DIR_TEMPLATE "/tmp/afuse-XXXXXX"
 char *mount_point_directory;
 
+// Data structure filled in when parsing command line args
 struct user_options_t {
 	char *mount_command_template;
 	char *unmount_command_template;
-} user_options = {NULL, NULL};
-
-typedef struct _fd_list_t {
-	struct _fd_list_t *next;
-	struct _fd_list_t *prev;
-
-	int fd;
-} fd_list_t;
-
-typedef struct _dir_list_t {
-	struct _dir_list_t *next;
-	struct _dir_list_t *prev;
-
-	DIR *dir;
-} dir_list_t;
+	bool mount_inuse_only;
+	bool mount_inuse_only_all;
+	bool flush_writes;
+} user_options = {NULL, NULL, false, false, false};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -78,31 +65,7 @@ typedef struct _mount_list_t {
 
 mount_list_t *mount_list = NULL;
 
-void *my_malloc(size_t size)
-{
-	void *p;
-
-	p = malloc(size);
-
-	if(!p) {
-		fprintf(stderr, "Failed to allocate: %d bytes of memory.\n");
-		exit(1);
-	}
-
-	return p;
-}
-
-char *my_strdup(char *str)
-{
-	char *new_str;
-
-	new_str = my_malloc(strlen(str) + 1);
-	strcpy(new_str, str);
-
-	return new_str;
-}
-
-mount_list_t *find_mount(char *root_name)
+mount_list_t *find_mount(const char *root_name)
 {
 	mount_list_t *current_mount = mount_list;
 
@@ -116,104 +79,12 @@ mount_list_t *find_mount(char *root_name)
 	return NULL;
 }
        
-int is_mount(char *root_name)
+int is_mount(const char *root_name)
 {
 	return find_mount(root_name) ? 1 : 0;
 }
 
-void add_fd(fd_list_t **fd_list, int fd)
-{
-	fd_list_t *new_fd;
-
-	new_fd = my_malloc( sizeof(fd_list_t) );
-	new_fd->fd = fd;
-	new_fd->next = *fd_list;
-	new_fd->prev = NULL;
-
-	*fd_list = new_fd;
-}
-
-void remove_fd(fd_list_t **fd_list, int fd)
-{
-	fd_list_t *current_fd = *fd_list;
-	
-	while(current_fd) {
-		if(current_fd->fd == fd) {
-			if(current_fd->prev)
-				current_fd->prev->next = current_fd->next;
-			else
-				*fd_list = current_fd->next;
-			if(current_fd->next)
-				current_fd->next->prev = current_fd->prev;
-			free(current_fd);
-
-			return;
-		}
-
-		current_fd = current_fd->next;
-	}
-}
-
-void add_dir(dir_list_t **dir_list, DIR *dir)
-{
-	dir_list_t *new_dir;
-
-	new_dir = my_malloc( sizeof(dir_list_t) );
-	new_dir->dir = dir;
-	new_dir->next = *dir_list;
-	new_dir->prev = NULL;
-
-	*dir_list = new_dir;
-}
-
-void remove_dir(dir_list_t **dir_list, DIR *dir)
-{
-	dir_list_t *current_dir = *dir_list;
-
-	while(current_dir) {
-		if(current_dir->dir == dir) {
-			if(current_dir->prev)
-				current_dir->prev->next = current_dir->next;
-			else
-				*dir_list = current_dir->next;
-			if(current_dir->next)
-				current_dir->next->prev = current_dir->prev;
-			free(current_dir);
-
-			return;
-		}
-
-		current_dir = current_dir->next;
-	}
-}
-
-void close_all_fds(fd_list_t **fd_list)
-{
-	while(*fd_list) {
-		int retries;
-		
-		for(retries = 0; retries < CLOSE_MAX_RETRIES &&
-		                 close((*fd_list)->fd) == -1   &&
-		                 errno == EINTR;
-		    retries++);
-		remove_fd(fd_list, (*fd_list)->fd);
-	}
-}
-
-void close_all_dirs(dir_list_t **dir_list)
-{
-	while(*dir_list) {
-		int retries;
-		
-		for(retries = 0; retries < CLOSE_MAX_RETRIES &&
-		                 closedir((*dir_list)->dir) == -1   &&
-		                 errno == EINTR;
-		    retries++);
-		remove_dir(dir_list, (*dir_list)->dir);
-	}
-}
-
-void add_mount(char *root_name)
+void add_mount(const char *root_name)
 {
 	mount_list_t *new_mount;
 	
@@ -230,8 +101,7 @@ void add_mount(char *root_name)
 	mount_list = new_mount;
 }
 
-
-void remove_mount(char *root_name)
+void remove_mount(const char *root_name)
 {
 	mount_list_t *current_mount = mount_list;
 
@@ -253,7 +123,7 @@ void remove_mount(char *root_name)
 	}
 }
 
-int make_mount_point(char *root_name)
+int make_mount_point(const char *root_name)
 {
 	char *dir_tmp;
 	int i;
@@ -290,7 +160,7 @@ int make_mount_point(char *root_name)
 
 
 // !!FIXME!! allow escaping of %'s
-char *expand_template(char *template, char *mount_point, char *root_name)
+char *expand_template(const char *template, const char *mount_point, const char *root_name)
 {
 	int len = 0;
 	int i;
@@ -340,7 +210,7 @@ char *expand_template(char *template, char *mount_point, char *root_name)
 	return expanded_name_start;
 }
 
-int do_mount(char *root_name)
+int do_mount(const char *root_name)
 {
 	char *mount_point;
 	char *mount_command;
@@ -384,7 +254,7 @@ int do_mount(char *root_name)
 	return 1;
 }
 
-int do_umount(char *root_name)
+int do_umount(const char *root_name)
 {
 	char *mount_point;
 	char *unmount_command;
@@ -468,10 +338,9 @@ int extract_root_name(const char *path, char *root_name)
 
 typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_PROXY_DIR} proc_result_t;
 
-proc_result_t process_path(const char *path_in, char *path_out, int attempt_mount)
+proc_result_t process_path(const char *path_in, char *path_out, char *root_name, int attempt_mount)
 {
 	int i;
-	char *root_name = alloca(strlen(path_in));
 	char *path_out_base;
 	int is_child;
 
@@ -504,6 +373,27 @@ proc_result_t process_path(const char *path_in, char *path_out, int attempt_moun
 	return strlen(root_name) ? PROC_PATH_PROXY_DIR : PROC_PATH_ROOT_DIR;
 }
 
+// Calling this function unmounts a dir if the user has specified to umount FS'
+// not inuse and if there are no file or directory handles open. The
+// update_operation flag combined with the mount_inuse_only_all user option
+// allows unmounting only after destructive operations.
+void consider_umount(const char *root_name, bool update_operation)
+{
+	fprintf(stderr, "Considering unmount of: %s\n", root_name);
+	if((user_options.mount_inuse_only && update_operation) ||
+	    user_options.mount_inuse_only_all) {
+		mount_list_t *mount = find_mount(root_name);
+		if(mount &&
+		   dir_list_empty(mount->dir_list) && 
+		   fd_list_empty(mount->fd_list)) {
+			fprintf(stderr, "Decided to umount\n", root_name);
+			do_umount(root_name);
+		}
+	} else {
+		fprintf(stderr, "No user option\n", root_name);
+	}
+}
+
 static int afuse_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
@@ -512,7 +402,7 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 
 	fprintf(stderr, "> GetAttr\n");
 
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -538,6 +428,7 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = lstat(real_path, stbuf);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 
@@ -549,9 +440,10 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 static int afuse_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -561,6 +453,7 @@ static int afuse_readlink(const char *path, char *buf, size_t size)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = readlink(real_path, buf, size - 1);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 
@@ -576,7 +469,7 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 	mount_list_t *mount;
 	char *real_path = alloca( max_path_out_len(path) );
        
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -587,14 +480,15 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 		case PROC_PATH_PROXY_DIR:
 			dp = opendir(real_path);
 
-			if (dp == NULL)
+			if (dp == NULL) {
+				consider_umount(root_name, false);
 				return -errno;
+			}
 
 			fi->fh = (unsigned long) dp;
-			extract_root_name(path, root_name);
 			mount = find_mount(root_name);
 			if(mount)
-				add_dir(&mount->dir_list, dp);
+				dir_list_add(&mount->dir_list, dp);
 			return 0;
 	}
 }
@@ -609,10 +503,11 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
 	DIR *dp = get_dirp(fi);
 	struct dirent *de;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	mount_list_t *mount;
        
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -634,6 +529,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				if (filler(buf, de->d_name, &st, telldir(dp)))
 					break;
 			}
+			consider_umount(root_name, false);
 
 			return 0;
 	}
@@ -644,10 +540,9 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 	DIR *dp = get_dirp(fi);
 	mount_list_t *mount;
 	char *root_name = alloca( strlen(path) );
-
 	char *real_path = alloca( max_path_out_len(path) );
        
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -659,10 +554,12 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 			extract_root_name(path, root_name);
 			mount = find_mount(root_name);
 			if(mount)
-				remove_dir(&mount->dir_list, dp);
+				dir_list_remove(&mount->dir_list, dp);
 			
 			closedir(dp);
 	
+			consider_umount(root_name, false);
+			
 			return 0;
 	}
 }
@@ -670,11 +567,12 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
 	fprintf(stderr, "> Mknod\n");
 
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -687,6 +585,7 @@ static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 				res = mkfifo(real_path, mode);
 			else
 				res = mknod(real_path, mode, rdev);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -697,9 +596,10 @@ static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 static int afuse_mkdir(const char *path, mode_t mode)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -709,6 +609,7 @@ static int afuse_mkdir(const char *path, mode_t mode)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = mkdir(real_path, mode);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -719,9 +620,10 @@ static int afuse_mkdir(const char *path, mode_t mode)
 static int afuse_unlink(const char *path)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -731,6 +633,7 @@ static int afuse_unlink(const char *path)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = unlink(real_path);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -741,9 +644,10 @@ static int afuse_unlink(const char *path)
 static int afuse_rmdir(const char *path)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -753,6 +657,7 @@ static int afuse_rmdir(const char *path)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = rmdir(real_path);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -763,9 +668,10 @@ static int afuse_rmdir(const char *path)
 static int afuse_symlink(const char *from, const char *to)
 {
 	int res;
+	char *root_name_to = alloca( strlen(to) );
 	char *real_to_path = alloca( max_path_out_len(to) );
 	
-	switch( process_path(to, real_to_path, 0) )
+	switch( process_path(to, real_to_path, root_name_to, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -775,6 +681,7 @@ static int afuse_symlink(const char *from, const char *to)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = symlink(from, real_to_path);
+			consider_umount(root_name_to, true);
 			if (res == -1)
 				return -errno;
 
@@ -785,10 +692,12 @@ static int afuse_symlink(const char *from, const char *to)
 static int afuse_rename(const char *from, const char *to)
 {
 	int res;
+	char *root_name_from = alloca( strlen(from) );
+	char *root_name_to = alloca( strlen(to) );
 	char *real_from_path = alloca( max_path_out_len(from) );
 	char *real_to_path = alloca( max_path_out_len(to) );
 	
-	switch( process_path(from, real_from_path, 0) )
+	switch( process_path(from, real_from_path, root_name_from, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -797,16 +706,20 @@ static int afuse_rename(const char *from, const char *to)
 			return -ENOTSUP;
 			
 		case PROC_PATH_PROXY_DIR:
-			switch( process_path(to, real_to_path, 0) )
+			switch( process_path(to, real_to_path, root_name_to, 0) )
 			{
 				case PROC_PATH_FAILED:
+					consider_umount(root_name_from, false);
 					return -ENXIO;
 
 				case PROC_PATH_ROOT_DIR:
+					consider_umount(root_name_from, false);
 					return -ENOTSUP;
 					
 				case PROC_PATH_PROXY_DIR:
 					res = rename(real_from_path, real_to_path);
+					consider_umount(root_name_from, true);
+					consider_umount(root_name_to, true);
 					if (res == -1)
 						return -errno;
 
@@ -818,10 +731,12 @@ static int afuse_rename(const char *from, const char *to)
 static int afuse_link(const char *from, const char *to)
 {
 	int res;
+	char *root_name_from = alloca( strlen(from) );
+	char *root_name_to = alloca( strlen(to) );
 	char *real_from_path = alloca( max_path_out_len(from) );
 	char *real_to_path = alloca( max_path_out_len(to) );
 	
-	switch( process_path(from, real_from_path, 0) )
+	switch( process_path(from, real_from_path, root_name_from, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -830,16 +745,20 @@ static int afuse_link(const char *from, const char *to)
 			return -ENOTSUP;
 			
 		case PROC_PATH_PROXY_DIR:
-			switch( process_path(to, real_to_path, 0) )
+			switch( process_path(to, real_to_path, root_name_to, 0) )
 			{
 				case PROC_PATH_FAILED:
+					consider_umount(root_name_from, false);
 					return -ENXIO;
 
 				case PROC_PATH_ROOT_DIR:
+					consider_umount(root_name_from, false);
 					return -ENOTSUP;
 					
 				case PROC_PATH_PROXY_DIR:
 					res = link(real_from_path, real_to_path);
+					consider_umount(root_name_from, true);
+					consider_umount(root_name_to, true);
 					if (res == -1)
 						return -errno;
 
@@ -851,9 +770,10 @@ static int afuse_link(const char *from, const char *to)
 static int afuse_chmod(const char *path, mode_t mode)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -863,6 +783,7 @@ static int afuse_chmod(const char *path, mode_t mode)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = chmod(real_path, mode);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -873,9 +794,10 @@ static int afuse_chmod(const char *path, mode_t mode)
 static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -885,6 +807,7 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = lchown(real_path, uid, gid);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -895,9 +818,10 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 static int afuse_truncate(const char *path, off_t size)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -907,6 +831,7 @@ static int afuse_truncate(const char *path, off_t size)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = truncate(real_path, size);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -918,9 +843,10 @@ static int afuse_truncate(const char *path, off_t size)
 static int afuse_utime(const char *path, struct utimbuf *buf)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -930,6 +856,7 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = utime(real_path, buf);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 
@@ -945,7 +872,7 @@ static int afuse_open(const char *path, struct fuse_file_info *fi)
 	mount_list_t *mount;
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -955,14 +882,16 @@ static int afuse_open(const char *path, struct fuse_file_info *fi)
 			
 		case PROC_PATH_PROXY_DIR:
 			fd = open(real_path, fi->flags);
-			if (fd == -1)
+			if (fd == -1) {
+				consider_umount(root_name, true);
 				return -errno;
+			}
 
 			fi->fh = fd;
 			extract_root_name(path, root_name);
 			mount = find_mount(root_name);
 			if(mount)
-				add_fd(&mount->fd_list, fd);
+				fd_list_add(&mount->fd_list, fd);
 			return 0;
 	}
 }
@@ -990,6 +919,9 @@ static int afuse_write(const char *path, const char *buf, size_t size,
 	if (res == -1)
 		res = -errno;
 
+	if(user_options.flush_writes)
+		fsync(fi->fh);
+
 	return res;
 }
 
@@ -1002,9 +934,11 @@ static int afuse_release(const char *path, struct fuse_file_info *fi)
 	extract_root_name(path, root_name);
 	mount = find_mount(root_name);
 	if(mount)
-		remove_fd(&mount->fd_list, fi->fh);
+		fd_list_remove(&mount->fd_list, fi->fh);
     
 	close(fi->fh);
+	consider_umount(root_name, true);
+
 
 	return 0;
 }
@@ -1033,9 +967,10 @@ static int afuse_fsync(const char *path, int isdatasync,
 static int afuse_access(const char *path, int mask)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1043,6 +978,7 @@ static int afuse_access(const char *path, int mask)
 		case PROC_PATH_ROOT_DIR:
 		case PROC_PATH_PROXY_DIR:
 			res = access(real_path, mask);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 
@@ -1067,9 +1003,10 @@ static int afuse_ftruncate(const char *path, off_t size,
 static int afuse_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
 	int fd;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1079,6 +1016,7 @@ static int afuse_create(const char *path, mode_t mode, struct fuse_file_info *fi
 			
 		case PROC_PATH_PROXY_DIR:
 			fd = open(real_path, fi->flags, mode);
+			consider_umount(root_name, true);
 			if (fd == -1)
 				return -errno;
 
@@ -1110,9 +1048,10 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 #endif
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1134,6 +1073,7 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 		
 		case PROC_PATH_PROXY_DIR:
 			res = statvfs(real_path, stbuf);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 
@@ -1152,9 +1092,10 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
                         size_t size, int flags)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1164,6 +1105,7 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
 			
 		case PROC_PATH_PROXY_DIR:
 			res = lsetxattr(real_path, name, value, size, flags);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 			return 0;
@@ -1174,9 +1116,10 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
                     size_t size)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1186,6 +1129,7 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 			
 		case PROC_PATH_PROXY_DIR:
 			res = lgetxattr(real_path, name, value, size);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 			return res;
@@ -1195,9 +1139,10 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 static int afuse_listxattr(const char *path, char *list, size_t size)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 
-	switch( process_path(path, real_path, 1) )
+	switch( process_path(path, real_path, root_name, 1) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1207,6 +1152,7 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = llistxattr(real_path, list, size);
+			consider_umount(root_name, false);
 			if (res == -1)
 				return -errno;
 			return res;
@@ -1216,9 +1162,10 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 static int afuse_removexattr(const char *path, const char *name)
 {
 	int res;
+	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	
-	switch( process_path(path, real_path, 0) )
+	switch( process_path(path, real_path, root_name, 0) )
 	{
 		case PROC_PATH_FAILED:
 			return -ENXIO;
@@ -1228,6 +1175,7 @@ static int afuse_removexattr(const char *path, const char *name)
 			
 		case PROC_PATH_PROXY_DIR:
 			res = lremovexattr(real_path, name);
+			consider_umount(root_name, true);
 			if (res == -1)
 				return -errno;
 			return 0;
@@ -1275,7 +1223,10 @@ static struct fuse_operations afuse_oper = {
 
 
 enum {
-	KEY_HELP
+	KEY_HELP,
+	KEY_INUSEONLY,
+	KEY_INUSEONLYALL,
+	KEY_FLUSHWRITES
 };
 
 #define AFUSE_OPT(t, p, v) { t, offsetof(struct user_options_t, p), v }
@@ -1283,6 +1234,10 @@ enum {
 static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("mount_template=%s", mount_command_template, 0),
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
+
+	FUSE_OPT_KEY("inuseonly", KEY_INUSEONLY),
+	FUSE_OPT_KEY("inuseonlyall", KEY_INUSEONLYALL),
+	FUSE_OPT_KEY("flushwrites", KEY_FLUSHWRITES),
 
 	FUSE_OPT_KEY("-h",     KEY_HELP),
 	FUSE_OPT_KEY("--help", KEY_HELP),
@@ -1302,6 +1257,9 @@ static void usage(const char *progname)
 "afuse options:\n"
 "    -o mount_template=CMD    template for CMD to execute to mount (*)\n"
 "    -o unmount_template=CMD  template for CMD to execute to unmount (*) (**)\n"
+"    -o inuseonly             unmount fs after files are closed or dir updates\n"
+"    -o inuseonlyall          as inuseonly, but all access end in unmount\n"
+"    -o flushwrites           flushes data to disk for all file writes\n"
 "\n\n"
 " (*) - When executed, %%r and %%m are expanded in templates to the root\n"
 "       directory name for the new mount point, and the actual directory to\n"
@@ -1315,9 +1273,6 @@ static void usage(const char *progname)
 static int afuse_opt_proc(void *data, const char *arg, int key,
                           struct fuse_args *outargs)
 {
-	struct user_options_t *user_options = (struct user_options_t *)user_options;
-	
-	(void) user_options;
 	(void) arg;
 
 	switch(key)
@@ -1327,6 +1282,18 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 			fuse_opt_add_arg(outargs, "-ho");
 			fuse_main(outargs->argc, outargs->argv, &afuse_oper);
 			exit(1);
+
+		case KEY_INUSEONLY:
+			user_options.mount_inuse_only = true;
+			return 0;
+
+		case KEY_INUSEONLYALL:
+			user_options.mount_inuse_only_all = true;
+			return 0;
+
+		case KEY_FLUSHWRITES:
+			user_options.flush_writes = true;
+			return 0;
 
 		default:
 			return 1;
