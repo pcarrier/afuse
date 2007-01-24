@@ -160,6 +160,7 @@ int make_mount_point(const char *root_name)
 
 
 // !!FIXME!! allow escaping of %'s
+// Note: this method strips out quotes and applies them itself as should be appropriate
 char *expand_template(const char *template, const char *mount_point, const char *root_name)
 {
 	int len = 0;
@@ -173,15 +174,15 @@ char *expand_template(const char *template, const char *mount_point, const char 
 			switch(template[i + 1])
 			{
 				case 'm':
-					len += strlen(mount_point);
+					len += strlen(mount_point) + 2;
 					i++;
 					break;
 				case 'r':
-					len += strlen(root_name);
+					len += strlen(root_name) + 2;
 					i++;
 					break;
 			}
-		} else
+		} else if(template[i] != '"')
 			len++;
 	
 	expanded_name_start = expanded_name = my_malloc(len + 1);
@@ -192,17 +193,21 @@ char *expand_template(const char *template, const char *mount_point, const char 
 			switch(template[i + 1])
 			{
 				case 'm':
+					*expanded_name++ = '"';
 					while(mount_point[j])
 						*expanded_name++ = mount_point[j++];
+					*expanded_name++ = '"';
 					i++;
 					break;
 				case 'r':
+					*expanded_name++ = '"';
 					while(root_name[j])
 						*expanded_name++ = root_name[j++];
+					*expanded_name++ = '"';
 					i++;
 					break;
 			}
-		} else
+		} else if(template[i] != '"')
 			*expanded_name++ = template[i];
 	
 	*expanded_name = '\0';
@@ -231,12 +236,11 @@ int do_mount(const char *root_name)
 	mount_command = expand_template(user_options.mount_command_template,
 	                                mount_point, root_name);
 	sysret = system(mount_command);
-	free(mount_command);
 
 	fprintf(stderr, "sysret: %.8x\n", sysret);
 
 	if(sysret) {
-		fprintf(stderr, "Failed to invoke mount command: \"%s\" (%s)\n",
+		fprintf(stderr, "Failed to invoke mount command: '%s' (%s)\n",
 		        mount_command, sysret != -1 ?
 			               "Error executing mount" :
 				       strerror(errno));
@@ -246,11 +250,13 @@ int do_mount(const char *root_name)
 			fprintf(stderr, "Failed to remove mount point dir: %s (%s)",
 				mount_point, strerror(errno));
 
+		free(mount_command);
 		return 0;
 	}
 
 	add_mount(root_name);
 
+	free(mount_command);
 	return 1;
 }
 
@@ -275,12 +281,12 @@ int do_umount(const char *root_name)
 	unmount_command = expand_template(user_options.unmount_command_template,
 	                                  mount_point, root_name);
 	sysret = system(unmount_command);
-	free(unmount_command);
 	if(sysret) {
-		fprintf(stderr, "Failed to invoke unmount command: \"%s\" (%s)\n",
+		fprintf(stderr, "Failed to invoke unmount command: '%s' (%s)\n",
 		        unmount_command, sysret != -1 ?
 			               "Error executing mount" :
 				       strerror(errno));
+		free(unmount_command);
 		return 0;
 	}
 	
@@ -290,6 +296,7 @@ int do_umount(const char *root_name)
 		fprintf(stderr, "Failed to remove mount point dir: %s (%s)",
 			mount_point, strerror(errno));
 
+	free(unmount_command);
 	return 1;
 }
 
