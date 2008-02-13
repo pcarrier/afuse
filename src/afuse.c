@@ -1,6 +1,6 @@
 /*
-	afuse -  An automounter using FUSE
-	Copyright (C) 2006  Jacob Bower <jacob.bower@ic.ac.uk>
+	afuse -	 An automounter using FUSE
+	Copyright (C) 2006	Jacob Bower <jacob.bower@ic.ac.uk>
 
 	Portions of this program derive from examples provided with
 	FUSE-2.5.2.
@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <signal.h>
@@ -42,26 +43,149 @@
 #include "dir_list.h"
 #include "utils.h"
 
+#include "variable_pairing_heap.h"
+
 #define TMP_DIR_TEMPLATE "/tmp/afuse-XXXXXX"
 char *mount_point_directory;
+dev_t mount_point_dev;
 
 // Data structure filled in when parsing command line args
 struct user_options_t {
 	char *mount_command_template;
 	char *unmount_command_template;
-	bool mount_inuse_only;
-	bool mount_inuse_only_all;
 	bool flush_writes;
-} user_options = {NULL, NULL, false, false, false};
+	uint64_t auto_unmount_delay;
+} user_options = {NULL, NULL, false, UINT64_MAX};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
 	struct _mount_list_t *prev;
 
 	char *root_name;
+	char *mount_point;
 	fd_list_t *fd_list;
 	dir_list_t *dir_list;
+
+	PH_NEW_LINK(struct _mount_list_t) auto_unmount_ph_node;
+	/* This is the sort key for the auto_unmount_ph heap.  It will
+	   equal UINT64_MAX if this node is not in the heap. */
+	int64_t auto_unmount_time;
 } mount_list_t;
+
+PH_DECLARE_TYPE(auto_unmount_ph, mount_list_t)
+PH_DEFINE_TYPE(auto_unmount_ph, mount_list_t, auto_unmount_ph_node, auto_unmount_time)
+
+#define BLOCK_SIGALRM \
+	sigset_t block_sigalrm_oldset, block_sigalrm_set;	\
+	sigemptyset(&block_sigalrm_set); \
+	sigaddset(&block_sigalrm_set, SIGALRM); \
+	sigprocmask(SIG_BLOCK, &block_sigalrm_set, &block_sigalrm_oldset)
+
+#define UNBLOCK_SIGALRM \
+	sigprocmask(SIG_SETMASK, &block_sigalrm_oldset, NULL)
+
+auto_unmount_ph_t auto_unmount_ph;
+int64_t auto_unmount_next_timeout = INT64_MAX;
+
+static int64_t from_timeval(const struct timeval *tv)
+{
+	return (int64_t)tv->tv_sec * 1000000 + ((int64_t)tv->tv_usec);
+}
+
+static void to_timeval(struct timeval *tv, int64_t usec)
+{
+	tv->tv_sec = usec / 1000000;
+	tv->tv_usec = usec % 1000000;
+}
+
+static int get_retval(int res)
+{
+	if (res == -1)
+		return -errno;
+	return 0;
+}
+
+static int check_mount(mount_list_t *mount)
+{
+	struct stat buf;
+
+	if (lstat(mount->mount_point, &buf) == -1)
+		return 0;
+	if (buf.st_dev == mount_point_dev)
+		return 0;
+	return 1;
+}
+
+static void update_auto_unmount(mount_list_t *mount)
+{
+	if (user_options.auto_unmount_delay == UINT64_MAX)
+		return;
+
+	/* Get the current time */
+	struct timeval tv;
+	mount_list_t *min_mount;
+	int64_t cur_time, next_time;
+	gettimeofday(&tv, NULL);
+	cur_time = from_timeval(&tv);
+
+	if (mount)
+	{
+		/* Always remove first */
+		if (mount->auto_unmount_time != INT64_MAX)
+			auto_unmount_ph_remove(&auto_unmount_ph, mount);
+
+		if (!mount->fd_list && !mount->dir_list)
+		{
+			mount->auto_unmount_time = cur_time + user_options.auto_unmount_delay;
+			auto_unmount_ph_insert(&auto_unmount_ph, mount);
+		} else
+		{
+			mount->auto_unmount_time = INT64_MAX;
+		}
+	}
+	min_mount = auto_unmount_ph_min(&auto_unmount_ph);
+	next_time = min_mount ? min_mount->auto_unmount_time : INT64_MAX;
+
+	if (next_time != auto_unmount_next_timeout)
+	{
+		struct itimerval itv;
+		auto_unmount_next_timeout = next_time;
+
+		if (next_time != INT64_MAX)
+		{
+			if (next_time > cur_time)
+				to_timeval(&itv.it_value, next_time - cur_time);
+			else /* Timer is set to expire immediately --- set it to 1 instead*/
+				to_timeval(&itv.it_value, 1);
+		} else
+		{
+			/* Disable the timer */
+			to_timeval(&itv.it_value, 0);
+		}
+		to_timeval(&itv.it_interval, 0);
+		if (setitimer(ITIMER_REAL, &itv, NULL) != 0) {
+			perror("Error setting timer");
+		}
+	}
+}
+
+static void handle_auto_unmount_timer(int x)
+{
+	/* Get the current time */
+	struct timeval tv;
+	int64_t cur_time;
+	mount_list_t *mount;
+	gettimeofday(&tv, NULL);
+	cur_time = from_timeval(&tv);
+
+	while ((mount = auto_unmount_ph_min(&auto_unmount_ph)) != NULL &&
+		   mount->auto_unmount_time <= cur_time)
+	{
+		do_umount(mount);
+	}
+
+	update_auto_unmount(NULL);
+}
 
 mount_list_t *mount_list = NULL;
 
@@ -72,90 +196,76 @@ mount_list_t *find_mount(const char *root_name)
 	while(current_mount) {
 		if( strcmp(root_name, current_mount->root_name) == 0)
 			return current_mount;
-			
+
 		current_mount = current_mount->next;
 	}
 
 	return NULL;
 }
-       
+
 int is_mount(const char *root_name)
 {
 	return find_mount(root_name) ? 1 : 0;
 }
 
-void add_mount(const char *root_name)
+mount_list_t *add_mount(const char *root_name, char *mount_point)
 {
 	mount_list_t *new_mount;
-	
+
 	new_mount = (mount_list_t *)my_malloc( sizeof(mount_list_t) );
 	new_mount->root_name = my_strdup(root_name);
+	new_mount->mount_point = mount_point;
 
 	new_mount->next = mount_list;
 	new_mount->prev = NULL;
 	new_mount->fd_list = NULL;
 	new_mount->dir_list = NULL;
+	new_mount->auto_unmount_time = INT64_MAX;
 	if(mount_list)
 		mount_list->prev = new_mount;
-	
+
 	mount_list = new_mount;
+
+	update_auto_unmount(new_mount);
+
+	return new_mount;
 }
 
-void remove_mount(const char *root_name)
+void remove_mount(mount_list_t *current_mount)
 {
-	mount_list_t *current_mount = mount_list;
+	if (current_mount->auto_unmount_time != INT64_MAX)
+		auto_unmount_ph_remove(&auto_unmount_ph, current_mount);
 
-	while(current_mount) {
-		if( strcmp(root_name, current_mount->root_name) == 0) {
-			free(current_mount->root_name);
-			if(current_mount->prev)
-				current_mount->prev->next = current_mount->next;
-			else
-				mount_list = current_mount->next;
-			if(current_mount->next)
-				current_mount->next->prev = current_mount->prev;
-			free(current_mount);
-
-			return;
-		}
-
-		current_mount = current_mount->next;
-	}
+	free(current_mount->root_name);
+	free(current_mount->mount_point);
+	if(current_mount->prev)
+		current_mount->prev->next = current_mount->next;
+	else
+		mount_list = current_mount->next;
+	if(current_mount->next)
+		current_mount->next->prev = current_mount->prev;
+	free(current_mount);
+	update_auto_unmount(NULL);
 }
 
-int make_mount_point(const char *root_name)
+char *make_mount_point(const char *root_name)
 {
 	char *dir_tmp;
 	int i;
-	
-	// First create the mount_point_directory
-	dir_tmp = my_strdup(mount_point_directory);
-	for(i = 0; dir_tmp[i]; i++)
-		if(dir_tmp[i] == '/' && i != 0) {
-			dir_tmp[i] = '\0';
-			if(mkdir(dir_tmp, 0700) == -1 && errno != EEXIST) {
-				fprintf(stderr, "Cannot create directory: %s (%s)\n",
-				        dir_tmp, strerror(errno));
-				return 0;
-			}
-			dir_tmp[i] = '/';
-		}
-	free(dir_tmp);
-	
+
 	// Create the mount point
 	dir_tmp = my_malloc(strlen(mount_point_directory) + 2 + strlen(root_name));
 	strcpy(dir_tmp, mount_point_directory);
 	strcat(dir_tmp, "/");
 	strcat(dir_tmp, root_name);
-	
+
 	if(mkdir(dir_tmp, 0700) == -1 && errno != EEXIST) {
 		fprintf(stderr, "Cannot create directory: %s (%s)\n",
 			dir_tmp, strerror(errno));
-		return 0;
+		free(dir_tmp);
+		return NULL;
 	}
-	free(dir_tmp);
-
-	return 1;
+	return dir_tmp;
 }
 
 
@@ -184,7 +294,7 @@ char *expand_template(const char *template, const char *mount_point, const char 
 			}
 		} else if(template[i] != '"')
 			len++;
-	
+
 	expanded_name_start = expanded_name = my_malloc(len + 1);
 
 	for(i = 0; template[i]; i++)
@@ -209,13 +319,13 @@ char *expand_template(const char *template, const char *mount_point, const char 
 			}
 		} else if(template[i] != '"')
 			*expanded_name++ = template[i];
-	
+
 	*expanded_name = '\0';
-	
+
 	return expanded_name_start;
 }
 
-int do_mount(const char *root_name)
+mount_list_t *do_mount(const char *root_name)
 {
 	char *mount_point;
 	char *mount_command;
@@ -224,15 +334,12 @@ int do_mount(const char *root_name)
 
 	fprintf(stderr, "Mounting: %s\n", root_name);
 
-	if( !make_mount_point(root_name) ) {
+	if( !(mount_point = make_mount_point(root_name)) ) {
 		fprintf(stderr, "Failed to create mount point directory: %s/%s\n",
 		        mount_point_directory, root_name);
-		return 0;
+		return NULL;
 	}
-		
-	mount_point = alloca(strlen(mount_point_directory) + 2 + strlen(root_name));
-	sprintf(mount_point, "%s/%s", mount_point_directory, root_name);
-	
+
 	mount_command = expand_template(user_options.mount_command_template,
 	                                mount_point, root_name);
 	sysret = system(mount_command);
@@ -251,51 +358,38 @@ int do_mount(const char *root_name)
 				mount_point, strerror(errno));
 
 		free(mount_command);
-		return 0;
+		free(mount_point);
+		return NULL;
 	}
 
-	add_mount(root_name);
+	mount = add_mount(root_name, mount_point);
 
 	free(mount_command);
-	return 1;
+	return mount;
 }
 
-int do_umount(const char *root_name)
+int do_umount(mount_list_t *mount)
 {
-	char *mount_point;
 	char *unmount_command;
-	mount_list_t *mount;
 	int sysret;
 
-	fprintf(stderr, "Unmounting: %s\n", root_name);
-		
-	mount = find_mount(root_name);
-	if(!mount) {
-		fprintf(stderr, "Internal Error: tried to unmount non-existant mount point: %s\n", root_name);
-		return 1;
-	}
-	
-	mount_point = alloca(strlen(mount_point_directory) + 2 + strlen(root_name));
-	sprintf(mount_point, "%s/%s", mount_point_directory, root_name);
+	fprintf(stderr, "Unmounting: %s\n", mount->root_name);
 
 	unmount_command = expand_template(user_options.unmount_command_template,
-	                                  mount_point, root_name);
+	                                  mount->mount_point, mount->root_name);
 	sysret = system(unmount_command);
 	if(sysret) {
 		fprintf(stderr, "Failed to invoke unmount command: '%s' (%s)\n",
 		        unmount_command, sysret != -1 ?
 			               "Error executing mount" :
 				       strerror(errno));
-		free(unmount_command);
-		return 0;
+		/* Still unmount anyway */
 	}
-	
-	// tidy up after succesful unmount
-	remove_mount(root_name);
-	if( rmdir(mount_point) == -1 )
-		fprintf(stderr, "Failed to remove mount point dir: %s (%s)",
-			mount_point, strerror(errno));
 
+	if( rmdir(mount->mount_point) == -1 )
+		fprintf(stderr, "Failed to remove mount point dir: %s (%s)",
+				mount->mount_point, strerror(errno));
+	remove_mount(mount);
 	free(unmount_command);
 	return 1;
 }
@@ -303,21 +397,23 @@ int do_umount(const char *root_name)
 void unmount_all(void)
 {
 	fprintf(stderr, "Attemping to unmount all filesystems:\n");
-	
+
 	while(mount_list) {
 		fprintf(stderr, "\tUnmounting: %s\n", mount_list->root_name);
-		
-		// if unmount fails, ditch the mount anyway
-		if( !do_umount(mount_list->root_name) )
-			remove_mount(mount_list->root_name);
+
+		do_umount(mount_list);
 	}
-	
+
 	fprintf(stderr, "done.\n");
 }
 
 void shutdown(void)
 {
+	BLOCK_SIGALRM;
+
 	unmount_all();
+
+	UNBLOCK_SIGALRM;
 
 	if(rmdir(mount_point_directory) == -1)
 		fprintf(stderr, "Failed to remove temporary mount point directory: %s (%s)\n",
@@ -335,7 +431,7 @@ int extract_root_name(const char *path, char *root_name)
 {
 	int i;
 	int is_child;
-	
+
 	for(i = 1; path[i] && path[i] != '/'; i++)
 		root_name[i - 1] = path[i];
 	root_name[i - 1] = '\0';
@@ -345,60 +441,55 @@ int extract_root_name(const char *path, char *root_name)
 
 typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_PROXY_DIR} proc_result_t;
 
-proc_result_t process_path(const char *path_in, char *path_out, char *root_name, int attempt_mount)
+proc_result_t process_path(const char *path_in, char *path_out, char *root_name, int attempt_mount, mount_list_t **out_mount)
 {
 	int i;
 	char *path_out_base;
 	int is_child;
+	int len;
+	mount_list_t *mount = NULL;
+
+	*out_mount = NULL;
 
 	fprintf(stderr, "Path in: %s\n", path_in);
 	is_child = extract_root_name(path_in, root_name);
 	fprintf(stderr, "root_name is: %s\n", root_name);
-	
+
 	// Mount filesystem if neccessary
 	// the combination of is_child and attempt_mount prevent inappropriate
 	// mounting of a filesystem for example if the user tries to mknod
 	// in the afuse root this should cause an error not a mount.
-	// !!FIXME!! this is broken on FUSE < 2.5 (?) because a getattr 
+	// !!FIXME!! this is broken on FUSE < 2.5 (?) because a getattr
 	// on the root node seems to occur with every single access.
-	if( //(is_child || attempt_mount ) && 
-	    strlen(root_name) > 0        &&
-	    !is_mount(root_name)         &&
-	    !do_mount(root_name))
+	if( /*(is_child || attempt_mount ) &&  */
+	   strlen(root_name) > 0            &&
+	   !(mount = find_mount(root_name)) &&
+	   !(mount = do_mount(root_name)))
 		return PROC_PATH_FAILED;
+
+	if (mount && !check_mount(mount))
+	{
+		do_umount(mount);
+		mount = do_mount(root_name);
+		if (!mount)
+			return PROC_PATH_FAILED;
+	}
 
 	// construct path_out (mount_point_directory + '/' + path_in + '\0')
 	path_out_base = path_out;
-	for(i = 0; i < strlen(mount_point_directory); i++)
-		*path_out++ = mount_point_directory[i];
+	len = strlen(mount_point_directory);
+	memcpy(path_out, mount_point_directory, len);
+	path_out += len;
 	*path_out++ = '/';
-	for(i = 0; i < strlen(path_in) - 1; i++)
-		*path_out++ = path_in[i + 1];
+	len = strlen(path_in) - 1;
+	memcpy(path_out, path_in + 1, len);
+	path_out += len;
 	*path_out = '\0';
 	fprintf(stderr, "Path out: %s\n", path_out_base);
-	
-	return strlen(root_name) ? PROC_PATH_PROXY_DIR : PROC_PATH_ROOT_DIR;
-}
 
-// Calling this function unmounts a dir if the user has specified to umount FS'
-// not inuse and if there are no file or directory handles open. The
-// update_operation flag combined with the mount_inuse_only_all user option
-// allows unmounting only after destructive operations.
-void consider_umount(const char *root_name, bool update_operation)
-{
-	fprintf(stderr, "Considering unmount of: %s\n", root_name);
-	if((user_options.mount_inuse_only && update_operation) ||
-	    user_options.mount_inuse_only_all) {
-		mount_list_t *mount = find_mount(root_name);
-		if(mount &&
-		   dir_list_empty(mount->dir_list) && 
-		   fd_list_empty(mount->fd_list)) {
-			fprintf(stderr, "Decided to umount\n", root_name);
-			do_umount(root_name);
-		}
-	} else {
-		fprintf(stderr, "No user option\n", root_name);
-	}
+	*out_mount = mount;
+
+	return strlen(root_name) ? PROC_PATH_PROXY_DIR : PROC_PATH_ROOT_DIR;
 }
 
 static int afuse_getattr(const char *path, struct stat *stbuf)
@@ -406,18 +497,21 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	int retval;
+	mount_list_t *mount;
+	BLOCK_SIGALRM;
 
 	fprintf(stderr, "> GetAttr\n");
 
-	switch( process_path(path, real_path, root_name, 0) )
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
-			extract_root_name(path, root_name);
 			fprintf(stderr, "Getattr on: (%s) - %s\n", path, root_name);
-			if( is_mount(root_name) || strlen(root_name) == 0) {
+			if(mount || strlen(root_name) == 0) {
 				stbuf->st_mode    = S_IFDIR | 0700;
 				stbuf->st_nlink   = 1;
 				stbuf->st_uid     = getuid();
@@ -428,45 +522,53 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 				stbuf->st_atime   = 0;
 				stbuf->st_mtime   = 0;
 				stbuf->st_ctime   = 0;
-                                                       
-				return 0;
+				retval = 0;
 			} else
-				return -ENOENT;
-			
+				retval = -ENOENT;
+			break;
+
 		case PROC_PATH_PROXY_DIR:
-			res = lstat(real_path, stbuf);
-			consider_umount(root_name, false);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(lstat(real_path, stbuf));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
-
 
 static int afuse_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	int retval;
+	mount_list_t *mount;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOENT;
-			
+			retval = -ENOENT;
+			break;
 		case PROC_PATH_PROXY_DIR:
 			res = readlink(real_path, buf, size - 1);
-			consider_umount(root_name, false);
 			if (res == -1)
-				return -errno;
-
+			{
+				retval = -errno;
+				break;
+			}
 			buf[res] = '\0';
-			return 0;
+			retval = 0;
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_opendir(const char *path, struct fuse_file_info *fi)
@@ -475,29 +577,33 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 	char *root_name = alloca( strlen(path) );
 	mount_list_t *mount;
 	char *real_path = alloca( max_path_out_len(path) );
-       
-	switch( process_path(path, real_path, root_name, 1) )
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return 0;
-			
+			retval = 0;
+			break;
 		case PROC_PATH_PROXY_DIR:
 			dp = opendir(real_path);
-
 			if (dp == NULL) {
-				consider_umount(root_name, false);
-				return -errno;
+				retval = -errno;
+				break;
 			}
-
 			fi->fh = (unsigned long) dp;
-			mount = find_mount(root_name);
 			if(mount)
 				dir_list_add(&mount->dir_list, dp);
-			return 0;
+			retval = 0;
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static inline DIR *get_dirp(struct fuse_file_info *fi)
@@ -512,20 +618,32 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	struct dirent *de;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	mount_list_t *mount;
-       
-	switch( process_path(path, real_path, root_name, 1) )
+	mount_list_t *mount, *next;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
 			filler(buf, ".", NULL, 0);
 			filler(buf, "..", NULL, 0);
-			for(mount = mount_list; mount; mount = mount->next)
-				filler(buf, mount->root_name, NULL, 0);
-			return 0;
-			
+			for(mount = mount_list; mount; mount = next)
+			{
+				next = mount->next;
+				/* Check for dead mounts. */
+				if (!check_mount(mount))
+					do_umount(mount);
+				else
+					filler(buf, mount->root_name, NULL, 0);
+			}
+			mount = NULL;
+			retval = 0;
+			break;
+
 		case PROC_PATH_PROXY_DIR:
 			seekdir(dp, offset);
 			while ((de = readdir(dp)) != NULL) {
@@ -536,10 +654,13 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				if (filler(buf, de->d_name, &st, telldir(dp)))
 					break;
 			}
-			consider_umount(root_name, false);
-
-			return 0;
+			retval = 0;
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
@@ -548,302 +669,342 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 	mount_list_t *mount;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-       
-	switch( process_path(path, real_path, root_name, 1) )
+	int retval;
+
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
-			return 0;
-			
+			retval = 0;
+			break;
+
 		case PROC_PATH_PROXY_DIR:
-			extract_root_name(path, root_name);
-			mount = find_mount(root_name);
-			if(mount)
+			if (mount)
 				dir_list_remove(&mount->dir_list, dp);
-			
 			closedir(dp);
-	
-			consider_umount(root_name, false);
-			
-			return 0;
+			retval = 0;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 	fprintf(stderr, "> Mknod\n");
 
-	switch( process_path(path, real_path, root_name, 0) )
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
+
 		case PROC_PATH_PROXY_DIR:
 			if (S_ISFIFO(mode))
-				res = mkfifo(real_path, mode);
+				retval = get_retval(mkfifo(real_path, mode));
 			else
-				res = mknod(real_path, mode, rdev);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+				retval = get_retval(mknod(real_path, mode, rdev));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_mkdir(const char *path, mode_t mode)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	int retval;
+	mount_list_t *mount;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = mkdir(real_path, mode);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(mkdir(real_path, mode));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_unlink(const char *path)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 0) )
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = unlink(real_path);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(unlink(real_path));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_rmdir(const char *path)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = rmdir(real_path);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			if (!extract_root_name(path, root_name))
+			{
+				/* Unmount */
+				if (mount->dir_list || mount->fd_list)
+					retval = -EBUSY;
+				else
+				{
+					do_umount(mount);
+					mount = NULL;
+					retval = 0;
+				}
+			} else
+				retval = get_retval(rmdir(real_path));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_symlink(const char *from, const char *to)
 {
-	int res;
 	char *root_name_to = alloca( strlen(to) );
 	char *real_to_path = alloca( max_path_out_len(to) );
-	
-	switch( process_path(to, real_to_path, root_name_to, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(to, real_to_path, root_name_to, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = symlink(from, real_to_path);
-			consider_umount(root_name_to, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(symlink(from, real_to_path));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_rename(const char *from, const char *to)
 {
-	int res;
 	char *root_name_from = alloca( strlen(from) );
 	char *root_name_to = alloca( strlen(to) );
 	char *real_from_path = alloca( max_path_out_len(from) );
 	char *real_to_path = alloca( max_path_out_len(to) );
-	
-	switch( process_path(from, real_from_path, root_name_from, 0) )
+	mount_list_t *mount_from, *mount_to = NULL;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(from, real_from_path, root_name_from, 0, &mount_from) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
+
 		case PROC_PATH_PROXY_DIR:
-			switch( process_path(to, real_to_path, root_name_to, 0) )
+			switch( process_path(to, real_to_path, root_name_to, 0, &mount_to) )
 			{
 				case PROC_PATH_FAILED:
-					consider_umount(root_name_from, false);
-					return -ENXIO;
+					retval = -ENXIO;
+					break;
 
 				case PROC_PATH_ROOT_DIR:
-					consider_umount(root_name_from, false);
-					return -ENOTSUP;
-					
-				case PROC_PATH_PROXY_DIR:
-					res = rename(real_from_path, real_to_path);
-					consider_umount(root_name_from, true);
-					consider_umount(root_name_to, true);
-					if (res == -1)
-						return -errno;
+					retval = -ENOTSUP;
+					break;
 
-					return 0;
+				case PROC_PATH_PROXY_DIR:
+					retval = get_retval(rename(real_from_path, real_to_path));
+					break;
 			}
+			break;
 	}
+	if (mount_to)
+		update_auto_unmount(mount_to);
+	if (mount_from && mount_from != mount_to)
+		update_auto_unmount(mount_from);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_link(const char *from, const char *to)
 {
-	int res;
 	char *root_name_from = alloca( strlen(from) );
 	char *root_name_to = alloca( strlen(to) );
 	char *real_from_path = alloca( max_path_out_len(from) );
 	char *real_to_path = alloca( max_path_out_len(to) );
-	
-	switch( process_path(from, real_from_path, root_name_from, 0) )
+	mount_list_t *mount_to = NULL, *mount_from;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(from, real_from_path, root_name_from, 0, &mount_from) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			switch( process_path(to, real_to_path, root_name_to, 0) )
+			switch( process_path(to, real_to_path, root_name_to, 0, &mount_to) )
 			{
 				case PROC_PATH_FAILED:
-					consider_umount(root_name_from, false);
-					return -ENXIO;
-
+					retval = -ENXIO;
+					break;
 				case PROC_PATH_ROOT_DIR:
-					consider_umount(root_name_from, false);
-					return -ENOTSUP;
-					
+					retval = -ENOTSUP;
+					break;
 				case PROC_PATH_PROXY_DIR:
-					res = link(real_from_path, real_to_path);
-					consider_umount(root_name_from, true);
-					consider_umount(root_name_to, true);
-					if (res == -1)
-						return -errno;
-
-					return 0;
+					retval = get_retval(link(real_from_path, real_to_path));
+					break;
 			}
+			break;
 	}
+	if (mount_to)
+		update_auto_unmount(mount_to);
+	if (mount_from && mount_from != mount_to)
+		update_auto_unmount(mount_from);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_chmod(const char *path, mode_t mode)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = chmod(real_path, mode);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(chmod(real_path, mode));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = lchown(real_path, uid, gid);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(lchown(real_path, uid, gid));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_truncate(const char *path, off_t size)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = truncate(real_path, size);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(truncate(real_path, size));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 
@@ -852,23 +1013,26 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = utime(real_path, buf);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(utime(real_path, buf));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 
@@ -878,29 +1042,34 @@ static int afuse_open(const char *path, struct fuse_file_info *fi)
 	char *root_name = alloca( strlen(path) );
 	mount_list_t *mount;
 	char *real_path = alloca( max_path_out_len(path) );
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOENT;
-			
+			retval = -ENOENT;
+			break;
 		case PROC_PATH_PROXY_DIR:
 			fd = open(real_path, fi->flags);
 			if (fd == -1) {
-				consider_umount(root_name, true);
-				return -errno;
+				retval = -errno;
+				break;
 			}
 
 			fi->fh = fd;
-			extract_root_name(path, root_name);
-			mount = find_mount(root_name);
 			if(mount)
 				fd_list_add(&mount->fd_list, fd);
-			return 0;
+			retval = 0;
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_read(const char *path, char *buf, size_t size, off_t offset,
@@ -937,17 +1106,21 @@ static int afuse_release(const char *path, struct fuse_file_info *fi)
 {
 	char *root_name = alloca( strlen(path) );
 	mount_list_t *mount;
-	
+	int retval;
+	BLOCK_SIGALRM;
+
 	extract_root_name(path, root_name);
 	mount = find_mount(root_name);
+	retval = get_retval(close(fi->fh));
+
 	if(mount)
+	{
 		fd_list_remove(&mount->fd_list, fi->fh);
-    
-	close(fi->fh);
-	consider_umount(root_name, true);
+		update_auto_unmount(mount);
+	}
 
-
-	return 0;
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_fsync(const char *path, int isdatasync,
@@ -964,47 +1137,39 @@ static int afuse_fsync(const char *path, int isdatasync,
 	else
 	#endif
 		res = fsync(fi->fh);
-	if (res == -1)
-		return -errno;
-
-	return 0;
+	return get_retval(res);
 }
 
 #if FUSE_VERSION >= 25
 static int afuse_access(const char *path, int mask)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
 		case PROC_PATH_PROXY_DIR:
-			res = access(real_path, mask);
-			consider_umount(root_name, false);
-			if (res == -1)
-				return -errno;
-
-			return 0;
+			retval = get_retval(access(real_path, mask));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_ftruncate(const char *path, off_t size,
                            struct fuse_file_info *fi)
 {
-	int res;
-
 	(void) path;
-
-	res = ftruncate(fi->fh, size);
-	if (res == -1)
-		return -errno;
-
-	return 0;
+	return get_retval(ftruncate(fi->fh, size));
 }
 
 static int afuse_create(const char *path, mode_t mode, struct fuse_file_info *fi)
@@ -1012,38 +1177,41 @@ static int afuse_create(const char *path, mode_t mode, struct fuse_file_info *fi
 	int fd;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 0) )
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
 			fd = open(real_path, fi->flags, mode);
-			consider_umount(root_name, true);
 			if (fd == -1)
-				return -errno;
-
+			{
+				retval = -errno;
+				break;
+			}
 			fi->fh = fd;
-			return 0;
+			retval = 0;
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_fgetattr(const char *path, struct stat *stbuf,
                           struct fuse_file_info *fi)
 {
-	int res;
-
 	(void) path;
 
-	res = fstat(fi->fh, stbuf);
-	if (res == -1)
-		return -errno;
-
-	return 0;
+	return get_retval(fstat(fi->fh, stbuf));
 }
 #endif
 
@@ -1054,14 +1222,17 @@ static int afuse_statfs(const char *path, struct statvfs *stbuf)
 static int afuse_statfs(const char *path, struct statfs *stbuf)
 #endif
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
+			retval = -ENXIO;
+			break;
 
 		case PROC_PATH_ROOT_DIR:
 #if FUSE_VERSION >= 25
@@ -1076,16 +1247,17 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 			stbuf->f_bavail  = 0;
 			stbuf->f_files   = 0;
 			stbuf->f_ffree   = 0;
-			return 0;
-		
-		case PROC_PATH_PROXY_DIR:
-			res = statvfs(real_path, stbuf);
-			consider_umount(root_name, false);
-			if (res == -1)
-				return -errno;
+			retval = 0;
+			break;
 
-			return 0;
+		case PROC_PATH_PROXY_DIR:
+			retval = get_retval(statvfs(real_path, stbuf));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 void afuse_destroy(void *p)
@@ -1096,97 +1268,109 @@ void afuse_destroy(void *p)
 #ifdef HAVE_SETXATTR
 /* xattr operations are optional and can safely be left unimplemented */
 static int afuse_setxattr(const char *path, const char *name, const char *value,
-                        size_t size, int flags)
+						  size_t size, int flags)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOENT;
-			
+			retval = -ENOENT;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = lsetxattr(real_path, name, value, size, flags);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-			return 0;
+			retval = get_retval(lsetxattr(real_path, name, value, size, flags));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_getxattr(const char *path, const char *name, char *value,
-                    size_t size)
+						  size_t size)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = lgetxattr(real_path, name, value, size);
-			consider_umount(root_name, false);
-			if (res == -1)
-				return -errno;
-			return res;
+			retval = get_retval(lgetxattr(real_path, name, value, size));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_listxattr(const char *path, char *list, size_t size)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
 
-	switch( process_path(path, real_path, root_name, 1) )
+	switch( process_path(path, real_path, root_name, 1, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = llistxattr(real_path, list, size);
-			consider_umount(root_name, false);
-			if (res == -1)
-				return -errno;
-			return res;
+			retval = get_retval(llistxattr(real_path, list, size));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 
 static int afuse_removexattr(const char *path, const char *name)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
-	
-	switch( process_path(path, real_path, root_name, 0) )
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch( process_path(path, real_path, root_name, 0, &mount) )
 	{
 		case PROC_PATH_FAILED:
-			return -ENXIO;
-
+			retval = -ENXIO;
+			break;
 		case PROC_PATH_ROOT_DIR:
-			return -ENOTSUP;
-			
+			retval = -ENOTSUP;
+			break;
 		case PROC_PATH_PROXY_DIR:
-			res = lremovexattr(real_path, name);
-			consider_umount(root_name, true);
-			if (res == -1)
-				return -errno;
-			return 0;
+			retval = get_retval(lremovexattr(real_path, name));
+			break;
 	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
 }
 #endif /* HAVE_SETXATTR */
 
@@ -1231,8 +1415,6 @@ static struct fuse_operations afuse_oper = {
 
 enum {
 	KEY_HELP,
-	KEY_INUSEONLY,
-	KEY_INUSEONLYALL,
 	KEY_FLUSHWRITES
 };
 
@@ -1242,13 +1424,12 @@ static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("mount_template=%s", mount_command_template, 0),
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
 
-	FUSE_OPT_KEY("inuseonly", KEY_INUSEONLY),
-	FUSE_OPT_KEY("inuseonlyall", KEY_INUSEONLYALL),
-	FUSE_OPT_KEY("flushwrites", KEY_FLUSHWRITES),
+	AFUSE_OPT("timeout=%Lu", auto_unmount_delay, 0),
 
+	FUSE_OPT_KEY("flushwrites",     KEY_FLUSHWRITES),
 	FUSE_OPT_KEY("-h",     KEY_HELP),
 	FUSE_OPT_KEY("--help", KEY_HELP),
-    
+
 	FUSE_OPT_END
 };
 
@@ -1264,8 +1445,7 @@ static void usage(const char *progname)
 "afuse options:\n"
 "    -o mount_template=CMD    template for CMD to execute to mount (*)\n"
 "    -o unmount_template=CMD  template for CMD to execute to unmount (*) (**)\n"
-"    -o inuseonly             unmount fs after files are closed or dir updates\n"
-"    -o inuseonlyall          as inuseonly, but all access end in unmount\n"
+"    -o timeout=TIMEOUT       automatically unmount after TIMEOUT microseconds\n"
 "    -o flushwrites           flushes data to disk for all file writes\n"
 "\n\n"
 " (*) - When executed, %%r and %%m are expanded in templates to the root\n"
@@ -1273,7 +1453,7 @@ static void usage(const char *progname)
 "       mount onto respectively to mount onto. Both templates are REQUIRED.\n"
 "\n"
 " (**) - The unmount command must perform a lazy unmount operation. E.g. the\n"
-"        -u -z options to fusermount, or -l for regular mount.\n"       
+"        -u -z options to fusermount, or -l for regular mount.\n"
 "\n", progname);
 }
 
@@ -1290,14 +1470,6 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 			fuse_main(outargs->argc, outargs->argv, &afuse_oper);
 			exit(1);
 
-		case KEY_INUSEONLY:
-			user_options.mount_inuse_only = true;
-			return 0;
-
-		case KEY_INUSEONLYALL:
-			user_options.mount_inuse_only_all = true;
-			return 0;
-
 		case KEY_FLUSHWRITES:
 			user_options.flush_writes = true;
 			return 0;
@@ -1312,12 +1484,26 @@ int main(int argc, char *argv[])
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	char *temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
 	strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
-	
+
 	if(fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) == -1)
 		return 1;
-	
+
 	// !!FIXME!! force single-threading for now as datastructures are not locked
 	fuse_opt_add_arg(&args, "-s");
+
+	auto_unmount_ph_init(&auto_unmount_ph);
+
+	/**
+	 * Install the SIGALRM signal handler.
+	 */
+	{
+		struct sigaction act;
+		act.sa_handler = &handle_auto_unmount_timer;
+		sigemptyset(&act.sa_mask);
+		act.sa_flags = 0;
+		while (sigaction(SIGALRM, &act, NULL) == -1 && errno == EINTR)
+			continue;
+	}
 
 	// Check for required parameters
 	if(!user_options.mount_command_template || !user_options.unmount_command_template) {
@@ -1325,7 +1511,7 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 		fuse_opt_add_arg(&args, "-ho");
 		fuse_main(args.argc, args.argv, &afuse_oper);
-		
+
 		return 1;
 	}
 
@@ -1333,15 +1519,26 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Failed to create temporary mount point dir.\n");
 		return 1;
 	}
-	
-	umask(0);
-	
-	// Register function to tidy up on exit conditions
-	if( atexit( shutdown ) ) {
-		fprintf(stderr, "Failed to register exit handler.\n");
-		return 1;
+
+	{
+		struct stat buf;
+		if (lstat(mount_point_directory, &buf) == -1) {
+			fprintf(stderr, "Failed to stat temporary mount point dir.\n");
+			return 1;
+		}
+		mount_point_dev = buf.st_dev;
 	}
+
+	umask(0);
+
 
 	// !!FIXME!! death by signal doesn't unmount fs
 	return fuse_main(args.argc, args.argv, &afuse_oper);
 }
+
+/*
+  Local Variables:
+  c-basic-offset: 4
+  indent-tabs-mode: t
+  End:
+ */
