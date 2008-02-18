@@ -1,10 +1,10 @@
-Afuse 0.1
-By Jacob Bower <jacob.bower@ic.ac.uk>
+Afuse 0.2
+Jacob Bower <jacob.bower@ic.ac.uk>
 http://afuse.sourceforge.net/
 
 
-0. Conents
-----------
+0. Contents
+-----------
 1. Abstract
 2. Example Usage
 3. Notes on Afuse's Operation
@@ -77,4 +77,4 @@ It can also mean that if afuse is not shutdown cleanly (via an unmount
 of the afuse filesystem) a stale directory can be left in /tmp of the
 form afuse-XXXXXX (where the X's are random characters).
 
-Hopefuly these limitations will be removed in later revisions of afuse.
+Hopefully these limitations will be removed in later revisions of afuse.

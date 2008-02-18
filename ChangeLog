@@ -1,3 +1,14 @@
+Version 0.2
+-------------
+* New features:
+	+ Timeout-based unmounting.
+	+ Forced immediate unmounting by removing root directory of
+	  auto mounts.
+* Fixes/optimisations:
+	+ Minor performance tweaks.
+	+ Better handling of filesystems which are unexpectedly
+	  unmounted.
+
 Version 0.1.1
 -------------
 * Backward compatibility with FUSE 2.3 (to 2.5).

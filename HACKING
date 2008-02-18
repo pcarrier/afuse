@@ -1,23 +1,15 @@
-CVS Build
+SVN Build
 ---------
-If you get afuse from CVS, run add-cruft.sh to generate the autotool crap.
-If your version of the autotools generates files not picked up in the 
-various .cvsignore files or the remove-cruft.sh script, and you have
-CVS write access please add them. Not that add-cruft.sh is likely
-to work on your system anyway as the autotools seem to do completely
-different things distro to distro.
-
-I really hate the way the autotools require all these stupid random
-files be created for operation and included in releases. Why can't it
-just be an actual program used to build source distributions based on
-the canonicalised config information?
+If you get afuse from SVN, run add-cruft.sh to generate various autotool
+scripts and config. If your version of the autotools generates files not
+listed in the 'svn:ignore' property or the remove-cruft.sh script, and
+you have SVN write access please add them.
 
 
 TODO
 ----
-While it is basically usable, there are a huge number of things which need
-doing to afuse to make it a "good" project. Here are a list of some of
-these:
+While afuse is basically usable, there are a huge number of things which need
+doing to afuse to make it "good". Here are a list of some of these:
 
 * Support multi-threading - Internatal Data structures need to guarded
   before we allow this.
@@ -27,8 +19,6 @@ these:
   really nasty deadlock. It might be possible for this to work using
   multi-threading or rebinding/moving mount points (needs changes to
   fusermount).
-
-* Timeout-based auto-unmounting after all files are closed.
 
 * Rather than umounting an FS to ensure directory changes are flushed,
   it should be possible to flush a handle to the parent dir instead.
