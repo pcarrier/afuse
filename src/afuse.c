@@ -1,12 +1,23 @@
 /*
 	afuse -	 An automounter using FUSE
-	Copyright (C) 2006	Jacob Bower <jacob.bower@ic.ac.uk>
+	Copyright (C) 2008 Jacob Bower <jacob.bower@ic.ac.uk>
 
 	Portions of this program derive from examples provided with
 	FUSE-2.5.2.
 
 	This program can be distributed under the terms of the GNU GPL.
 	See the file COPYING.
+
+	Contributions:
+
+	Feb '08, Jeremy Maitin-Shepard <jbms@cmu.edu>
+	* Added timeout-based unmounting.
+	* Forced immediate unmounting by removing root directory of
+	  auto mounts.
+	* Minor performance tweaks.
+	* Better handling of filesystems which are unexpectedly
+	  unmounted.
+
 */
 
 #include <config.h>
@@ -336,7 +347,7 @@ mount_list_t *do_mount(const char *root_name)
 
 	if( !(mount_point = make_mount_point(root_name)) ) {
 		fprintf(stderr, "Failed to create mount point directory: %s/%s\n",
-		        mount_point_directory, root_name);
+			mount_point_directory, root_name);
 		return NULL;
 	}
 
@@ -348,9 +359,9 @@ mount_list_t *do_mount(const char *root_name)
 
 	if(sysret) {
 		fprintf(stderr, "Failed to invoke mount command: '%s' (%s)\n",
-		        mount_command, sysret != -1 ?
-			               "Error executing mount" :
-				       strerror(errno));
+			mount_command, sysret != -1 ?
+				"Error executing mount" :
+				strerror(errno));
 
 		// remove the now unused directory
 		if( rmdir(mount_point) == -1 )
@@ -396,7 +407,7 @@ int do_umount(mount_list_t *mount)
 
 void unmount_all(void)
 {
-	fprintf(stderr, "Attemping to unmount all filesystems:\n");
+	fprintf(stderr, "Attempting to unmount all filesystems:\n");
 
 	while(mount_list) {
 		fprintf(stderr, "\tUnmounting: %s\n", mount_list->root_name);
@@ -441,7 +452,8 @@ int extract_root_name(const char *path, char *root_name)
 
 typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_PROXY_DIR} proc_result_t;
 
-proc_result_t process_path(const char *path_in, char *path_out, char *root_name, int attempt_mount, mount_list_t **out_mount)
+proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
+                           int attempt_mount, mount_list_t **out_mount)
 {
 	int i;
 	char *path_out_base;
@@ -455,7 +467,7 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 	is_child = extract_root_name(path_in, root_name);
 	fprintf(stderr, "root_name is: %s\n", root_name);
 
-	// Mount filesystem if neccessary
+	// Mount filesystem if necessary
 	// the combination of is_child and attempt_mount prevent inappropriate
 	// mounting of a filesystem for example if the user tries to mknod
 	// in the afuse root this should cause an error not a mount.
@@ -1086,7 +1098,7 @@ static int afuse_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static int afuse_write(const char *path, const char *buf, size_t size,
-                     off_t offset, struct fuse_file_info *fi)
+                       off_t offset, struct fuse_file_info *fi)
 {
 	int res;
 
@@ -1268,7 +1280,7 @@ void afuse_destroy(void *p)
 #ifdef HAVE_SETXATTR
 /* xattr operations are optional and can safely be left unimplemented */
 static int afuse_setxattr(const char *path, const char *name, const char *value,
-						  size_t size, int flags)
+                          size_t size, int flags)
 {
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
@@ -1445,7 +1457,7 @@ static void usage(const char *progname)
 "afuse options:\n"
 "    -o mount_template=CMD    template for CMD to execute to mount (*)\n"
 "    -o unmount_template=CMD  template for CMD to execute to unmount (*) (**)\n"
-"    -o timeout=TIMEOUT       automatically unmount after TIMEOUT microseconds\n"
+"    -o timeout=TIMEOUT       automatically unmount after TIMEOUT seconds\n"
 "    -o flushwrites           flushes data to disk for all file writes\n"
 "\n\n"
 " (*) - When executed, %%r and %%m are expanded in templates to the root\n"
@@ -1488,8 +1500,11 @@ int main(int argc, char *argv[])
 	if(fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) == -1)
 		return 1;
 
-	// !!FIXME!! force single-threading for now as datastructures are not locked
+	// !!FIXME!! force single-threading for now as data structures are not locked
 	fuse_opt_add_arg(&args, "-s");
+
+	// Adjust user specified timeout from seconds to microseconds as required
+	user_options.auto_unmount_delay *= 1000000;
 
 	auto_unmount_ph_init(&auto_unmount_ph);
 
