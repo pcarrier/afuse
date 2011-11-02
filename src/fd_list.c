@@ -1,6 +1,7 @@
 #define __FD_LIST_C
 
 #include <errno.h>
+#include <unistd.h>
 #include "afuse.h"
 #include "utils.h"
 #include "fd_list.h"

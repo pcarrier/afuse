@@ -29,8 +29,10 @@
 
 #include <fuse.h>
 #include <fuse_opt.h>
+#ifndef __USE_BSD
 // for mkdtemp
-#define __USE_BSD
+#  define __USE_BSD
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -180,6 +182,8 @@ static void update_auto_unmount(mount_list_t *mount)
 	}
 }
 
+int do_umount(mount_list_t *mount);
+
 static void handle_auto_unmount_timer(int x)
 {
 	/* Get the current time */
@@ -262,7 +266,6 @@ void remove_mount(mount_list_t *current_mount)
 char *make_mount_point(const char *root_name)
 {
 	char *dir_tmp;
-	int i;
 
 	// Create the mount point
 	dir_tmp = my_malloc(strlen(mount_point_directory) + 2 + strlen(root_name));
@@ -464,12 +467,11 @@ int max_path_out_len(const char *path_in)
 	return strlen(mount_point_directory) + strlen(path_in) + 2;
 }
 
-// returns true if path is the a child directory of a root node
+// returns true if path is a child directory of a root node
 // e.g. /a/b is a child, /a is not.
 int extract_root_name(const char *path, char *root_name)
 {
 	int i;
-	int is_child;
 
 	for(i = 1; path[i] && path[i] != '/'; i++)
 		root_name[i - 1] = path[i];
@@ -483,7 +485,6 @@ typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_PROXY_DIR} proc_re
 proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
                            int attempt_mount, mount_list_t **out_mount)
 {
-	int i;
 	char *path_out_base;
 	int is_child;
 	int len;
@@ -534,7 +535,6 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 
 static int afuse_getattr(const char *path, struct stat *stbuf)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	int retval;
@@ -1050,7 +1050,6 @@ static int afuse_truncate(const char *path, off_t size)
 
 static int afuse_utime(const char *path, struct utimbuf *buf)
 {
-	int res;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
 	mount_list_t *mount;

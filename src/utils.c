@@ -12,7 +12,7 @@ void *my_malloc(size_t size)
 	p = malloc(size);
 
 	if(!p) {
-		fprintf(stderr, "Failed to allocate: %d bytes of memory.\n");
+		fprintf(stderr, "Failed to allocate: %zu bytes of memory.\n", size);
 		exit(1);
 	}
 
