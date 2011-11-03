@@ -25,6 +25,8 @@
 #ifdef linux
 // For pread()/pwrite()
 #define _XOPEN_SOURCE 500
+// For getline()
+#define _GNU_SOURCE
 #endif
 
 #include <fuse.h>
@@ -54,6 +56,7 @@
 
 #include "fd_list.h"
 #include "dir_list.h"
+#include "string_sorted_list.h"
 #include "utils.h"
 
 #include "variable_pairing_heap.h"
@@ -66,9 +69,10 @@ dev_t mount_point_dev;
 struct user_options_t {
 	char *mount_command_template;
 	char *unmount_command_template;
+	char *populate_root_command;
 	bool flush_writes;
 	uint64_t auto_unmount_delay;
-} user_options = {NULL, NULL, false, UINT64_MAX};
+} user_options = {NULL, NULL, NULL, false, UINT64_MAX};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -480,7 +484,7 @@ int extract_root_name(const char *path, char *root_name)
 	return strlen(&path[i]);
 }
 
-typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_PROXY_DIR} proc_result_t;
+typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_ROOT_SUBDIR, PROC_PATH_PROXY_DIR} proc_result_t;
 
 proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
                            int attempt_mount, mount_list_t **out_mount)
@@ -502,7 +506,7 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 	// in the afuse root this should cause an error not a mount.
 	// !!FIXME!! this is broken on FUSE < 2.5 (?) because a getattr
 	// on the root node seems to occur with every single access.
-	if( /*(is_child || attempt_mount ) &&  */
+	if( (is_child || attempt_mount)     &&
 	   strlen(root_name) > 0            &&
 	   !(mount = find_mount(root_name)) &&
 	   !(mount = do_mount(root_name)))
@@ -530,7 +534,12 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 
 	*out_mount = mount;
 
-	return strlen(root_name) ? PROC_PATH_PROXY_DIR : PROC_PATH_ROOT_DIR;
+	if (is_child)
+		return PROC_PATH_PROXY_DIR;
+	else if (strlen(root_name))
+		return PROC_PATH_ROOT_SUBDIR;
+	else
+		return PROC_PATH_ROOT_DIR;
 }
 
 static int afuse_getattr(const char *path, struct stat *stbuf)
@@ -551,8 +560,22 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 
 		case PROC_PATH_ROOT_DIR:
 			fprintf(stderr, "Getattr on: (%s) - %s\n", path, root_name);
-			if(mount || strlen(root_name) == 0) {
-				stbuf->st_mode    = S_IFDIR | 0700;
+			stbuf->st_mode    = S_IFDIR | 0700;
+			stbuf->st_nlink   = 1;
+			stbuf->st_uid     = getuid();
+			stbuf->st_gid     = getgid();
+			stbuf->st_size    = 0;
+			stbuf->st_blksize = 0;
+			stbuf->st_blocks  = 0;
+			stbuf->st_atime   = 0;
+			stbuf->st_mtime   = 0;
+			stbuf->st_ctime   = 0;
+			retval = 0;
+			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			process_path(path, real_path, root_name, 1, &mount);
+			if (!mount) {
+				stbuf->st_mode    = S_IFDIR | 0000;
 				stbuf->st_nlink   = 1;
 				stbuf->st_uid     = getuid();
 				stbuf->st_gid     = getgid();
@@ -563,9 +586,8 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 				stbuf->st_mtime   = 0;
 				stbuf->st_ctime   = 0;
 				retval = 0;
-			} else
-				retval = -ENOENT;
-			break;
+				break;
+			}
 
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(lstat(real_path, stbuf));
@@ -594,6 +616,11 @@ static int afuse_readlink(const char *path, char *buf, size_t size)
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOENT;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOENT;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			res = readlink(real_path, buf, size - 1);
 			if (res == -1)
@@ -628,6 +655,12 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 		case PROC_PATH_ROOT_DIR:
 			retval = 0;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -EACCES;
+				fi->fh = 0lu;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			dp = opendir(real_path);
 			if (dp == NULL) {
@@ -651,6 +684,49 @@ static inline DIR *get_dirp(struct fuse_file_info *fi)
 	return (DIR *) (uintptr_t) fi->fh;
 }
 
+int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
+		fuse_fill_dir_t filler, void *buf)
+{
+	int err, e;
+	FILE *browser;
+	size_t hsize = 0, hlen;
+	char *host = NULL;
+
+	if (!pop_cmd)
+		return -1;
+
+	if ((browser = popen(pop_cmd, "r")) == NULL) {
+		fprintf(stderr, "Failed to execute populate_root_command=%s\n", pop_cmd);
+		return -errno;
+	}
+
+	while ((hlen = getline(&host, &hsize, browser)) != -1) {
+		if (hlen >= 1 && host[hlen - 1] == '\n')
+			host[hlen - 1] = '\0';
+
+		fprintf(stderr, "Got hostname \"%s\"\n", host);
+
+		err = insert_sorted_if_unique(host_listptr, host);
+		if (err == 1) // already in list
+			continue;
+		else if (err)
+			e = err;
+
+		if (strlen(host) != 0)
+			filler(buf, host, NULL, 0);
+	}
+	free(host);
+
+	err = pclose(browser);
+	if (err && !e) {
+		e = -errno;
+		fprintf(stderr, "populate_root_command failed, ret %d, status %d, errno %d (%s)\n",
+				err, WEXITSTATUS(err), -e, strerror(-e));
+	}
+
+	return e;
+}
+
 static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi)
 {
@@ -658,6 +734,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	struct dirent *de;
 	char *root_name = alloca( strlen(path) );
 	char *real_path = alloca( max_path_out_len(path) );
+	struct list_t *host_list = NULL;
 	mount_list_t *mount, *next;
 	int retval;
 	BLOCK_SIGALRM;
@@ -671,19 +748,31 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		case PROC_PATH_ROOT_DIR:
 			filler(buf, ".", NULL, 0);
 			filler(buf, "..", NULL, 0);
+			insert_sorted_if_unique(&host_list, ".");
+			insert_sorted_if_unique(&host_list, "..");
 			for(mount = mount_list; mount; mount = next)
 			{
 				next = mount->next;
 				/* Check for dead mounts. */
-				if (!check_mount(mount))
+				if (!check_mount(mount)) {
 					do_umount(mount);
-				else
+				} else {
+					if (insert_sorted_if_unique(&host_list, mount->root_name))
+						retval = -1;
 					filler(buf, mount->root_name, NULL, 0);
+				}
 			}
+			populate_root_dir(user_options.populate_root_command, &host_list, filler, buf);
+			destroy_list(&host_list);
 			mount = NULL;
 			retval = 0;
 			break;
 
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = (!dp) ? -EBADF : -EACCES;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			seekdir(dp, offset);
 			while ((de = readdir(dp)) != NULL) {
@@ -723,10 +812,12 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 			retval = 0;
 			break;
 
+		case PROC_PATH_ROOT_SUBDIR:
 		case PROC_PATH_PROXY_DIR:
 			if (mount)
 				dir_list_remove(&mount->dir_list, dp);
-			closedir(dp);
+			if (dp)
+				closedir(dp);
 			retval = 0;
 	}
 	if (mount)
@@ -751,6 +842,7 @@ static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 			break;
 
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 
@@ -781,6 +873,7 @@ static int afuse_mkdir(const char *path, mode_t mode)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -807,6 +900,7 @@ static int afuse_unlink(const char *path)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -835,9 +929,8 @@ static int afuse_rmdir(const char *path)
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOTSUP;
 			break;
-		case PROC_PATH_PROXY_DIR:
-			if (!extract_root_name(path, root_name))
-			{
+		case PROC_PATH_ROOT_SUBDIR:
+			if (mount) {
 				/* Unmount */
 				if (mount->dir_list || mount->fd_list)
 					retval = -EBUSY;
@@ -848,7 +941,10 @@ static int afuse_rmdir(const char *path)
 					retval = 0;
 				}
 			} else
-				retval = get_retval(rmdir(real_path));
+				retval = -ENOTSUP;
+			break;
+		case PROC_PATH_PROXY_DIR:
+			retval = get_retval(rmdir(real_path));
 			break;
 	}
 	if (mount)
@@ -871,6 +967,7 @@ static int afuse_symlink(const char *from, const char *to)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -900,6 +997,7 @@ static int afuse_rename(const char *from, const char *to)
 			break;
 
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 
@@ -911,6 +1009,7 @@ static int afuse_rename(const char *from, const char *to)
 					break;
 
 				case PROC_PATH_ROOT_DIR:
+				case PROC_PATH_ROOT_SUBDIR:
 					retval = -ENOTSUP;
 					break;
 
@@ -944,6 +1043,7 @@ static int afuse_link(const char *from, const char *to)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -953,6 +1053,7 @@ static int afuse_link(const char *from, const char *to)
 					retval = -ENXIO;
 					break;
 				case PROC_PATH_ROOT_DIR:
+				case PROC_PATH_ROOT_SUBDIR:
 					retval = -ENOTSUP;
 					break;
 				case PROC_PATH_PROXY_DIR:
@@ -983,6 +1084,7 @@ static int afuse_chmod(const char *path, mode_t mode)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -1009,6 +1111,7 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -1035,6 +1138,7 @@ static int afuse_truncate(const char *path, off_t size)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -1064,6 +1168,11 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOTSUP;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOTSUP;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(utime(real_path, buf));
 			break;
@@ -1090,6 +1199,7 @@ static int afuse_open(const char *path, struct fuse_file_info *fi)
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOENT;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -1197,6 +1307,12 @@ static int afuse_access(const char *path, int mask)
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(access(real_path, mask));
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (mount)
+				retval = get_retval(access(real_path, mask));
+			else
+				retval = -EACCES;
+			break;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1226,6 +1342,7 @@ static int afuse_create(const char *path, mode_t mode, struct fuse_file_info *fi
 			retval = -ENXIO;
 			break;
 		case PROC_PATH_ROOT_DIR:
+		case PROC_PATH_ROOT_SUBDIR:
 			retval = -ENOTSUP;
 			break;
 		case PROC_PATH_PROXY_DIR:
@@ -1289,6 +1406,11 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 			retval = 0;
 			break;
 
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -EACCES;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(statvfs(real_path, stbuf));
 			break;
@@ -1323,6 +1445,11 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOENT;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOTSUP;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(lsetxattr(real_path, name, value, size, flags));
 			break;
@@ -1350,6 +1477,11 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOTSUP;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOTSUP;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(lgetxattr(real_path, name, value, size));
 			break;
@@ -1376,6 +1508,11 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOTSUP;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOTSUP;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(llistxattr(real_path, list, size));
 			break;
@@ -1402,6 +1539,11 @@ static int afuse_removexattr(const char *path, const char *name)
 		case PROC_PATH_ROOT_DIR:
 			retval = -ENOTSUP;
 			break;
+		case PROC_PATH_ROOT_SUBDIR:
+			if (!mount) {
+				retval = -ENOTSUP;
+				break;
+			}
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(lremovexattr(real_path, name));
 			break;
@@ -1462,6 +1604,7 @@ enum {
 static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("mount_template=%s", mount_command_template, 0),
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
+	AFUSE_OPT("populate_root_command=%s", populate_root_command, 0),
 
 	AFUSE_OPT("timeout=%Lu", auto_unmount_delay, 0),
 
@@ -1482,10 +1625,11 @@ static void usage(const char *progname)
 "    -V   --version         print FUSE version information\n"
 "\n"
 "afuse options:\n"
-"    -o mount_template=CMD    template for CMD to execute to mount (*)\n"
-"    -o unmount_template=CMD  template for CMD to execute to unmount (*) (**)\n"
-"    -o timeout=TIMEOUT       automatically unmount after TIMEOUT seconds\n"
-"    -o flushwrites           flushes data to disk for all file writes\n"
+"    -o mount_template=CMD         template for CMD to execute to mount (*)\n"
+"    -o unmount_template=CMD       template for CMD to execute to unmount (*) (**)\n"
+"    -o populate_root_command=CMD  command to execute to unmount (***)\n"
+"    -o timeout=TIMEOUT            automatically unmount after TIMEOUT seconds\n"
+"    -o flushwrites                flushes data to disk for all file writes\n"
 "\n\n"
 " (*) - When executed, %%r and %%m are expanded in templates to the root\n"
 "       directory name for the new mount point, and the actual directory to\n"
@@ -1493,6 +1637,9 @@ static void usage(const char *progname)
 "\n"
 " (**) - The unmount command must perform a lazy unmount operation. E.g. the\n"
 "        -u -z options to fusermount, or -l for regular mount.\n"
+"\n"
+" (***) - The populate_root command is expected to return one hostname per line,\n"
+"         and return immediately.\n"
 "\n", progname);
 }
 
