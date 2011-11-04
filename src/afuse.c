@@ -71,8 +71,9 @@ struct user_options_t {
 	char *unmount_command_template;
 	char *populate_root_command;
 	bool flush_writes;
+	bool exact_getattr;
 	uint64_t auto_unmount_delay;
-} user_options = {NULL, NULL, NULL, false, UINT64_MAX};
+} user_options = {NULL, NULL, NULL, false, false, UINT64_MAX};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -573,9 +574,13 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 			retval = 0;
 			break;
 		case PROC_PATH_ROOT_SUBDIR:
-			process_path(path, real_path, root_name, 1, &mount);
+			if (user_options.exact_getattr)
+				/* try to mount it */
+				process_path(path, real_path, root_name, 1, &mount);
 			if (!mount) {
 				stbuf->st_mode    = S_IFDIR | 0000;
+				if (!user_options.exact_getattr)
+					stbuf->st_mode    = S_IFDIR | 0750;
 				stbuf->st_nlink   = 1;
 				stbuf->st_uid     = getuid();
 				stbuf->st_gid     = getgid();
@@ -1596,7 +1601,8 @@ static struct fuse_operations afuse_oper = {
 
 enum {
 	KEY_HELP,
-	KEY_FLUSHWRITES
+	KEY_FLUSHWRITES,
+	KEY_EXACT_GETATTR
 };
 
 #define AFUSE_OPT(t, p, v) { t, offsetof(struct user_options_t, p), v }
@@ -1608,7 +1614,8 @@ static struct fuse_opt afuse_opts[] = {
 
 	AFUSE_OPT("timeout=%Lu", auto_unmount_delay, 0),
 
-	FUSE_OPT_KEY("flushwrites",     KEY_FLUSHWRITES),
+	FUSE_OPT_KEY("exact_getattr", KEY_EXACT_GETATTR),
+	FUSE_OPT_KEY("flushwrites",   KEY_FLUSHWRITES),
 	FUSE_OPT_KEY("-h",     KEY_HELP),
 	FUSE_OPT_KEY("--help", KEY_HELP),
 
@@ -1658,6 +1665,10 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 
 		case KEY_FLUSHWRITES:
 			user_options.flush_writes = true;
+			return 0;
+
+		case KEY_EXACT_GETATTR:
+			user_options.exact_getattr = true;
 			return 0;
 
 		default:
