@@ -1,0 +1,10 @@
+#!/bin/sh
+
+cwd="`dirname "$0"`"
+
+mnt_templ="sshfs -o BatchMode=yes %r:/ %m"
+unmnt_templ="fusermount -u -z %m"
+pop_root_cmd="avahi-browse -trkp _sftp-ssh._tcp | grep '^=' | cut -d';' -f7"
+timeout="10s"
+
+"$cwd"/afuse -o mount_template="$mnt_templ" -o unmount_template="$unmnt_templ" -o populate_root_command="$pop_root_cmd" -o fsname=sshnet -o timeout="$timeout" "$@"
