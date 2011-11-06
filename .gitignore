@@ -1,0 +1,16 @@
+Makefile*
+*.o
+aclocal.m4
+autom4te.cache/
+compat/.deps/
+config.h
+config.h.in
+config.log
+config.status
+configure
+depcomp
+install-sh
+missing
+src/.deps/
+src/afuse
+stamp-h1
