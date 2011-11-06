@@ -10,6 +10,12 @@
 
 	Contributions:
 
+	Nov '11, Henry Gebhardt
+	* Add 'populate_root_command=' and 'exact_getattr' options.
+
+	Jul '08, Anders Kaseorg
+	* Fixed CVE-2008-2232
+
 	Feb '08, Jeremy Maitin-Shepard <jbms@cmu.edu>
 	* Added timeout-based unmounting.
 	* Forced immediate unmounting by removing root directory of

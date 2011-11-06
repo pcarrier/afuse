@@ -25,7 +25,6 @@ doing to afuse to make it "good". Here are a list of some of these:
 
 * More complex automounting schemes
   * Different commands based on regex's of virtual directories.
-  * Use a static list of automountable virtual directories.
   * Scriptable multi-level virtual directory hierachy.
 
 * Refactoring

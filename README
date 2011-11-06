@@ -1,4 +1,4 @@
-Afuse 0.2
+Afuse 0.3
 Jacob Bower <jacob.bower@ic.ac.uk>
 http://afuse.sourceforge.net/
 
@@ -60,6 +60,14 @@ interactivity (i.e.  asking for a password). So you probably want to be
 using something like ssh-agent.
 
 Alternatively, if want interactivity, add -f to the afuse invocation.
+
+If in addition to sshfs you have avahi-browser in your PATH, you can use
+the following example:
+
+	sshnet mountpoint/
+
+This script will use avahi to automatically populate the root directory
+with hosts that advertise their sftp service.
 
 
 3. Notes on Afuse's Operation
