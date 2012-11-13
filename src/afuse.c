@@ -56,9 +56,21 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <signal.h>
+
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
-#endif
+
+#ifdef XATTR_NOFOLLOW
+#define lgetxattr(p, n, v, s) \
+         getxattr(p, n, v, s, 0, XATTR_NOFOLLOW)
+#define lsetxattr(p, n, v, s, f) \
+         setxattr(p, n, v, s, 0, f | XATTR_NOFOLLOW)
+#define llistxattr(p, list, s) \
+         listxattr(p, list, s, XATTR_NOFOLLOW)
+#define lremovexattr(p, n) \
+         removexattr(p, n, XATTR_NOFOLLOW)
+#endif /* XATTR_NOFOLLOW */
+#endif /* HAVE_SETXATTR */
 
 #include "fd_list.h"
 #include "dir_list.h"
