@@ -46,7 +46,6 @@
 #include <string.h>
 #include <stddef.h>
 #include <unistd.h>
-#include <alloca.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
