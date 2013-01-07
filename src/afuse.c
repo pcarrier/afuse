@@ -1707,7 +1707,8 @@ int main(int argc, char *argv[])
 	fuse_opt_add_arg(&args, "-s");
 
 	// Adjust user specified timeout from seconds to microseconds as required
-	user_options.auto_unmount_delay *= 1000000;
+	if(user_options.auto_unmount_delay != UINT64_MAX)
+	    user_options.auto_unmount_delay *= 1000000;
 
 	auto_unmount_ph_init(&auto_unmount_ph);
 
