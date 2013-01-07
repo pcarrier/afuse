@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT([afuse], [0.2], [jacob.bower@ic.ac.uk])
+AC_INIT([afuse], [0.2.1], [jacob.bower@ic.ac.uk])
 
 AM_INIT_AUTOMAKE
 AC_PROG_RANLIB
