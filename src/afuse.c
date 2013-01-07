@@ -1630,7 +1630,7 @@ static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
 	AFUSE_OPT("populate_root_command=%s", populate_root_command, 0),
 
-	AFUSE_OPT("timeout=%Lu", auto_unmount_delay, 0),
+	AFUSE_OPT("timeout=%llu", auto_unmount_delay, 0),
 
 	FUSE_OPT_KEY("exact_getattr", KEY_EXACT_GETATTR),
 	FUSE_OPT_KEY("flushwrites",   KEY_FLUSHWRITES),
