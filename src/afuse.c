@@ -1,6 +1,6 @@
 /*
 	afuse -	 An automounter using FUSE
-	Copyright (C) 2008 Jacob Bower <jacob.bower@ic.ac.uk>
+	Copyright (C) 2008 Jacob Bower <jacob.bower@gmail.com>
 
 	Portions of this program derive from examples provided with
 	FUSE-2.5.2.
@@ -46,6 +46,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <alloca.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
@@ -55,7 +56,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <signal.h>
-
+#include <fnmatch.h>
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 
@@ -79,14 +80,15 @@
 #include "variable_pairing_heap.h"
 
 #define TMP_DIR_TEMPLATE "/tmp/afuse-XXXXXX"
-char *mount_point_directory;
-dev_t mount_point_dev;
+static char *mount_point_directory;
+static dev_t mount_point_dev;
 
 // Data structure filled in when parsing command line args
 struct user_options_t {
 	char *mount_command_template;
 	char *unmount_command_template;
 	char *populate_root_command;
+	char *filter_file;
 	bool flush_writes;
 	bool exact_getattr;
 	uint64_t auto_unmount_delay;
@@ -107,8 +109,16 @@ typedef struct _mount_list_t {
 	int64_t auto_unmount_time;
 } mount_list_t;
 
+typedef struct _mount_filter_list_t {
+	struct _mount_filter_list_t *next;
+
+	char *pattern;
+} mount_filter_list_t;
+
 PH_DECLARE_TYPE(auto_unmount_ph, mount_list_t)
 PH_DEFINE_TYPE(auto_unmount_ph, mount_list_t, auto_unmount_ph_node, auto_unmount_time)
+
+static mount_filter_list_t *mount_filter_list = NULL;
 
 #define BLOCK_SIGALRM \
 	sigset_t block_sigalrm_oldset, block_sigalrm_set;	\
@@ -119,8 +129,64 @@ PH_DEFINE_TYPE(auto_unmount_ph, mount_list_t, auto_unmount_ph_node, auto_unmount
 #define UNBLOCK_SIGALRM \
 	sigprocmask(SIG_SETMASK, &block_sigalrm_oldset, NULL)
 
-auto_unmount_ph_t auto_unmount_ph;
-int64_t auto_unmount_next_timeout = INT64_MAX;
+static auto_unmount_ph_t auto_unmount_ph;
+static int64_t auto_unmount_next_timeout = INT64_MAX;
+
+static void add_mount_filter(const char *glob)
+{
+	mount_filter_list_t *new_entry;
+
+	new_entry = my_malloc( sizeof(mount_filter_list_t) );
+	new_entry->pattern = my_strdup(glob);
+	new_entry->next = mount_filter_list;
+
+	mount_filter_list = new_entry;
+}
+
+static int is_mount_filtered(const char *mount_point)
+{
+	mount_filter_list_t *current_filter;
+
+	current_filter = mount_filter_list;
+
+	while(current_filter) {
+		if( ! fnmatch(current_filter->pattern, mount_point, 0) )
+			return 1;
+
+		current_filter = current_filter->next;
+	}
+
+	return 0;
+}
+
+static void load_mount_filter_file(const char *filename)
+{
+	FILE *filter_file;
+	if( (filter_file = fopen(filename, "r")) == NULL )  {
+		fprintf(stderr, "Failed to open filter file '%s'\n", filename);
+		exit(1);
+	}
+
+	char *line = NULL;
+	size_t llen, lsize;
+	while ((llen = getline(&line, &lsize, filter_file)) != -1) {
+		if(llen >= 1) {
+			if(line[0] == '#')
+				continue;
+
+			if(line[llen - 1] == '\n') {
+				line[llen - 1] = '\0';
+				llen--;
+			}
+		}
+
+		if(llen > 0)
+			add_mount_filter(line);
+	}
+	free(line);
+
+	fclose(filter_file);
+}
 
 static int64_t from_timeval(const struct timeval *tv)
 {
@@ -502,7 +568,12 @@ int extract_root_name(const char *path, char *root_name)
 	return strlen(&path[i]);
 }
 
-typedef enum {PROC_PATH_FAILED, PROC_PATH_ROOT_DIR, PROC_PATH_ROOT_SUBDIR, PROC_PATH_PROXY_DIR} proc_result_t;
+typedef enum {
+	PROC_PATH_FAILED,
+	PROC_PATH_ROOT_DIR,
+	PROC_PATH_ROOT_SUBDIR,
+	PROC_PATH_PROXY_DIR
+} proc_result_t;
 
 proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
                            int attempt_mount, mount_list_t **out_mount)
@@ -517,6 +588,9 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 	fprintf(stderr, "Path in: %s\n", path_in);
 	is_child = extract_root_name(path_in, root_name);
 	fprintf(stderr, "root_name is: %s\n", root_name);
+
+	if( is_mount_filtered(root_name) )
+		return PROC_PATH_FAILED;
 
 	// Mount filesystem if necessary
 	// the combination of is_child and attempt_mount prevent inappropriate
@@ -1628,6 +1702,7 @@ static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("mount_template=%s", mount_command_template, 0),
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
 	AFUSE_OPT("populate_root_command=%s", populate_root_command, 0),
+	AFUSE_OPT("filter_file=%s", filter_file, 0),
 
 	AFUSE_OPT("timeout=%llu", auto_unmount_delay, 0),
 
@@ -1649,22 +1724,36 @@ static void usage(const char *progname)
 "    -V   --version         print FUSE version information\n"
 "\n"
 "afuse options:\n"
-"    -o mount_template=CMD         template for CMD to execute to mount (*)\n"
-"    -o unmount_template=CMD       template for CMD to execute to unmount (*) (**)\n"
-"    -o populate_root_command=CMD  command to execute to unmount (***)\n"
+"    -o mount_template=CMD         template for CMD to execute to mount (1)\n"
+"    -o unmount_template=CMD       template for CMD to execute to unmount (1) (2)\n"
+"    -o populate_root_command=CMD  CMD to execute providing root directory list (3)\n"
+"    -o filter_file=FILE           FILE listing ignore filters for mount points (4)\n"
 "    -o timeout=TIMEOUT            automatically unmount after TIMEOUT seconds\n"
 "    -o flushwrites                flushes data to disk for all file writes\n"
 "\n\n"
-" (*) - When executed, %%r and %%m are expanded in templates to the root\n"
+" (1) - When executed, %%r and %%m are expanded in templates to the root\n"
 "       directory name for the new mount point, and the actual directory to\n"
 "       mount onto respectively to mount onto. Both templates are REQUIRED.\n"
 "\n"
-" (**) - The unmount command must perform a lazy unmount operation. E.g. the\n"
-"        -u -z options to fusermount, or -l for regular mount.\n"
+" (2) - The unmount command must perform a lazy unmount operation. E.g. the\n"
+"       -u -z options to fusermount, or -l for regular mount.\n"
 "\n"
-" (***) - The populate_root command is expected to return one hostname per line,\n"
-"         and return immediately.\n"
+" (3) - The populate_root command is expected to return one hostname per line,\n"
+"       and return immediately. It is run for each directory listing request.\n"
+"\n"
+" (4) - Each line of the filter file is a shell wildcard filter (glob). A '#'\n"
+"       as the first character on a line ignores a filter.\n"
+"\n"
+" The following filter patterns are hard-coded:"
 "\n", progname);
+
+	mount_filter_list_t *cur = mount_filter_list;
+	while(cur) {
+		fprintf(stderr, "    %s\n", cur->pattern);
+		cur = cur->next;
+	}
+
+	fprintf(stderr, "\n");
 }
 
 static int afuse_opt_proc(void *data, const char *arg, int key,
@@ -1699,6 +1788,8 @@ int main(int argc, char *argv[])
 	char *temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
 	strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
 
+	add_mount_filter("autorun.inf");
+
 	if(fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) == -1)
 		return 1;
 
@@ -1732,6 +1823,9 @@ int main(int argc, char *argv[])
 
 		return 1;
 	}
+
+	if(user_options.filter_file)
+		load_mount_filter_file(user_options.filter_file);
 
 	if( !(mount_point_directory = mkdtemp(temp_dir_name)) ) {
 		fprintf(stderr, "Failed to create temporary mount point dir.\n");
