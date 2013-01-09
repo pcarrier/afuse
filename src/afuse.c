@@ -800,7 +800,7 @@ int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
 		if (hlen >= 1 && host[hlen - 1] == '\n')
 			host[hlen - 1] = '\0';
 
-		fprintf(stderr, "Got hostname \"%s\"\n", host);
+		fprintf(stderr, "Got entry \"%s\"\n", host);
 
 		err = insert_sorted_if_unique(host_listptr, host);
 		if (err == 1) // already in list
