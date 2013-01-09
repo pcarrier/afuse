@@ -169,7 +169,13 @@ static void load_mount_filter_file(const char *filename)
 
 	char *line = NULL;
 	size_t llen, lsize;
+#ifdef HAVE_GETLINE
 	while ((llen = getline(&line, &lsize, filter_file)) != -1) {
+#elif HAVE_FGETLN
+	while (line = fgetln(filter_file, &llen)) {
+#else
+#  error Need getline or fgetln
+#endif
 		if(llen >= 1) {
 			if(line[0] == '#')
 				continue;
@@ -796,7 +802,13 @@ int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
 		return -errno;
 	}
 
+#ifdef HAVE_GETLINE
 	while ((hlen = getline(&host, &hsize, browser)) != -1) {
+#elif HAVE_FGETLN
+	while (host = fgetln(browser, &hsize)) {
+#else
+#  error Need getline or fgetln
+#endif
 		if (hlen >= 1 && host[hlen - 1] == '\n')
 			host[hlen - 1] = '\0';
 

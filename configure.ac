@@ -28,9 +28,14 @@ fi
 AM_CONDITIONAL(FUSE_OPT_COMPAT, test "$have_fuse_opt_parse" = no)
 
 
-AC_CHECK_FUNCS([setxattr fdatasync])
+AC_CHECK_FUNCS([setxattr fdatasync getline fgetln])
 
 AC_CONFIG_FILES([Makefile
                  src/Makefile
                  compat/Makefile])
+
+if test "x$ac_cv_func_getline" = "xno" -a "x$ac_cv_func_fgetln" = "xno"; then
+	AC_MSG_ERROR([Neither getline nor fgetln are available, we can't compile])
+fi
+
 AC_OUTPUT
