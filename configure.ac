@@ -16,7 +16,7 @@ AC_PROG_CC
 # Checks for libraries.
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
 PKG_CHECK_MODULES([FUSE], [fuse >= 2.3])
-CFLAGS="$CFLAGS $FUSE_CFLAGS -DFUSE_USE_VERSION=25"
+CFLAGS="$CFLAGS -Wall -Wextra $FUSE_CFLAGS -DFUSE_USE_VERSION=25"
 LIBS="$FUSE_LIBS"
 
 # Check if we need to enable compatibility code for old FUSE versions
