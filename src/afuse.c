@@ -93,7 +93,7 @@ struct user_options_t {
 	bool exact_getattr;
 	uint64_t auto_unmount_delay;
 } user_options = {
-NULL, NULL, NULL, false, false, UINT64_MAX};
+NULL, NULL, NULL, NULL, false, false, UINT64_MAX};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -170,7 +170,8 @@ static void load_mount_filter_file(const char *filename)
 	}
 
 	char *line = NULL;
-	size_t llen, lsize;
+	ssize_t llen;
+	size_t lsize;
 #ifdef HAVE_GETLINE
 	while ((llen = getline(&line, &lsize, filter_file)) != -1) {
 #elif HAVE_FGETLN
@@ -278,6 +279,7 @@ int do_umount(mount_list_t * mount);
 
 static void handle_auto_unmount_timer(int x)
 {
+	(void)x;		/* Ignored */
 	/* Get the current time */
 	struct timeval tv;
 	int64_t cur_time;
@@ -783,7 +785,8 @@ int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
 {
 	int err, e;
 	FILE *browser;
-	size_t hsize = 0, hlen;
+	size_t hsize = 0;
+	ssize_t hlen;
 	char *host = NULL;
 
 	if (!pop_cmd)
@@ -1506,6 +1509,7 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 
 void afuse_destroy(void *p)
 {
+	(void)p;		/* Unused */
 	shutdown();
 }
 
@@ -1742,7 +1746,9 @@ static void usage(const char *progname)
 static int afuse_opt_proc(void *data, const char *arg, int key,
 			  struct fuse_args *outargs)
 {
+	/* Unused */
 	(void)arg;
+	(void)data;
 
 	switch (key) {
 	case KEY_HELP:
