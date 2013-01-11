@@ -1,0 +1,29 @@
+Version 0.3
+-----------
+* Added ability to filter paths from auto-mounting via a file of patterns.
+* The path 'autorun.inf' is hard-coded as a filter to fix a problem in
+  Ubuntu/GNOME 3 desktop environments where a lookup occurs as soon as any afuse
+  mount is made.
+* Ability to populate root directory using output from an external process.
+* Added 'exact_getattr' option.
+
+Version 0.2
+-----------
+* New features:
+  + Timeout-based unmounting.
+  + Forced immediate unmounting by removing root directory of
+    auto mounts.
+* Fixes/optimisations:
+  + Minor performance tweaks.
+  + Better handling of filesystems which are unexpectedly
+    unmounted.
+
+Version 0.1.1
+-------------
+* Backward compatibility with FUSE 2.3 (to 2.5).
+* Internal bug fixes.
+* Moved to SVN due to SourceForge CVS being perpetually broken.
+
+Version 0.1
+-----------
+* Initial release
