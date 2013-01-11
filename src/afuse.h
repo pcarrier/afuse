@@ -10,4 +10,4 @@
 // succeed.
 #define CLOSE_MAX_RETRIES 5
 
-#endif // __AFUSE_H
+#endif				// __AFUSE_H

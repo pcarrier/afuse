@@ -19,9 +19,9 @@ typedef struct _fd_list_t {
 #define EXTERN extern
 #endif
 
-EXTERN void fd_list_add(fd_list_t **fd_list, int fd);
-EXTERN void fd_list_remove(fd_list_t **fd_list, int fd);
-EXTERN bool fd_list_empty(fd_list_t *fd_list);
-EXTERN void fd_list_close_all(fd_list_t **fd_list);
+EXTERN void fd_list_add(fd_list_t ** fd_list, int fd);
+EXTERN void fd_list_remove(fd_list_t ** fd_list, int fd);
+EXTERN bool fd_list_empty(fd_list_t * fd_list);
+EXTERN void fd_list_close_all(fd_list_t ** fd_list);
 
-#endif // __FD_LIST_H
+#endif				// __FD_LIST_H

@@ -1,5 +1,5 @@
-#include <stdlib.h> 
-#include <string.h> 
+#include <stdlib.h>
+#include <string.h>
 
 #include <stdio.h>
 
@@ -10,8 +10,7 @@ struct list_t {
 	char *name;
 };
 
-
-static char *stralloccopy(char const*const str)
+static char *stralloccopy(char const *const str)
 {
 	char *s = malloc((strlen(str) + 1) * sizeof(*s));
 	if (s != NULL)
@@ -20,7 +19,7 @@ static char *stralloccopy(char const*const str)
 }
 
 static struct list_t *new_list_element(struct list_t *prev, struct list_t *next,
-		char const*const name)
+				       char const *const name)
 {
 	struct list_t *e;
 	e = malloc(sizeof(*e));
@@ -37,8 +36,8 @@ static struct list_t *new_list_element(struct list_t *prev, struct list_t *next,
 	return e;
 }
 
-static struct list_t* insert_between(struct list_t *prev, struct list_t *next,
-		char const*const name)
+static struct list_t *insert_between(struct list_t *prev, struct list_t *next,
+				     char const *const name)
 {
 	struct list_t *e;
 
@@ -55,7 +54,7 @@ static struct list_t* insert_between(struct list_t *prev, struct list_t *next,
 }
 
 static int update_list(struct list_t **list, struct list_t *prev,
-		struct list_t *next, char const*const name)
+		       struct list_t *next, char const *const name)
 {
 	struct list_t *e;
 
@@ -68,8 +67,7 @@ static int update_list(struct list_t **list, struct list_t *prev,
 	return 0;
 }
 
-
-int insert_sorted_if_unique(struct list_t **list, char const*const name)
+int insert_sorted_if_unique(struct list_t **list, char const *const name)
 {
 	struct list_t *prev, *curr, *next;
 	int cmp;
@@ -121,7 +119,7 @@ void destroy_list(struct list_t **list)
 	*list = NULL;
 }
 
-void print_list(struct list_t const* curr)
+void print_list(struct list_t const *curr)
 {
 	if (curr == NULL) {
 		fprintf(stderr, "list is empty\n");

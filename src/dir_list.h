@@ -18,9 +18,9 @@ typedef struct _dir_list_t {
 #define EXTERN extern
 #endif
 
-EXTERN void dir_list_add(dir_list_t **dir_list, DIR *dir);
-EXTERN void dir_list_remove(dir_list_t **dir_list, DIR *dir);
-EXTERN void dir_list_close_all(dir_list_t **dir_list);
-EXTERN bool dir_list_empty(dir_list_t *dir_list);
+EXTERN void dir_list_add(dir_list_t ** dir_list, DIR * dir);
+EXTERN void dir_list_remove(dir_list_t ** dir_list, DIR * dir);
+EXTERN void dir_list_close_all(dir_list_t ** dir_list);
+EXTERN bool dir_list_empty(dir_list_t * dir_list);
 
-#endif // __DIR_LIST_H
+#endif				// __DIR_LIST_H

@@ -13,4 +13,4 @@
 EXTERN void *my_malloc(size_t size);
 EXTERN char *my_strdup(const char *str);
 
-#endif // __UTILS_H
+#endif				// __UTILS_H

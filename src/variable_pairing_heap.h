@@ -117,4 +117,4 @@
     }                                                                          \
   }
 
-#endif /* _VARIABLE_PAIRING_HEAP_H */
+#endif				/* _VARIABLE_PAIRING_HEAP_H */
