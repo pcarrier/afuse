@@ -1838,10 +1838,3 @@ int main(int argc, char *argv[])
 	// !!FIXME!! death by signal doesn't unmount fs
 	return fuse_main(args.argc, args.argv, &afuse_oper);
 }
-
-/*
-  Local Variables:
-  c-basic-offset: 4
-  indent-tabs-mode: t
-  End:
- */
