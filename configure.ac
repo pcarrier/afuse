@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT([afuse], [0.3])
+AC_INIT([afuse], [0.4])
 
 AM_INIT_AUTOMAKE
 AC_PROG_RANLIB
