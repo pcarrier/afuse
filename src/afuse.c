@@ -1,29 +1,12 @@
 /*
-	afuse -	 An automounter using FUSE
-	Copyright (C) 2008 Jacob Bower <jacob.bower@gmail.com>
+	afuse - An automounter using FUSE
+	Copyright (C) 2008-2013 Jacob Bower <jacob.bower@gmail.com>
 
 	Portions of this program derive from examples provided with
 	FUSE-2.5.2.
 
 	This program can be distributed under the terms of the GNU GPL.
 	See the file COPYING.
-
-	Contributions:
-
-	Nov '11, Henry Gebhardt
-	* Add 'populate_root_command=' and 'exact_getattr' options.
-
-	Jul '08, Anders Kaseorg
-	* Fixed CVE-2008-2232
-
-	Feb '08, Jeremy Maitin-Shepard <jbms@cmu.edu>
-	* Added timeout-based unmounting.
-	* Forced immediate unmounting by removing root directory of
-	  auto mounts.
-	* Minor performance tweaks.
-	* Better handling of filesystems which are unexpectedly
-	  unmounted.
-
 */
 
 #include <config.h>
