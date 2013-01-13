@@ -27,7 +27,7 @@ invoking users environment, for example allowing access to an ssh-agent for
 password-less sshfs mounts, or allowing access to a graphical environment to
 get user input to complete a mount such as asking for a password.
 
-afuse is distributed under the GPL license, details of which can be found in
+afuse is distributed under the GPLv2 license, details of which can be found in
 the COPYING file. Particularly, please note that while afuse is intended to be
 useful it is provided with ABSOLUTELY NO WARRANTY.
 
