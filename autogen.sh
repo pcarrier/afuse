@@ -1,3 +1,5 @@
 #!/bin/sh
 
-autoreconf --install
+set -e
+autoreconf --install --verbose
+./configure "$@"
