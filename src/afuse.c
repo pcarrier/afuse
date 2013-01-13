@@ -1812,6 +1812,7 @@ static void usage(const char *progname)
 		"    -o filter_file=FILE           FILE listing ignore filters for mount points (4)\n"
 		"    -o timeout=TIMEOUT            automatically unmount after TIMEOUT seconds\n"
 		"    -o flushwrites                flushes data to disk for all file writes\n"
+		"    -o exact_getattr              allows getattr calls to cause a mount\n" 
 		"\n\n"
 		" (1) - When executed, %%r and %%m are expanded in templates to the root\n"
 		"       directory name for the new mount point, and the actual directory to\n"

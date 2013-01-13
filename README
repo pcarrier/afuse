@@ -1,45 +1,41 @@
-Afuse 0.4
+afuse 0.4
 http://github.com/pcarrier/afuse/
 
 
 0. Contents
 -----------
 1. Abstract
-2. Example Usage
-3. Notes on Afuse's Operation
+2. Basic Usage
+3. Pre-populating afuse Root
+4. Misc Other Features
+5. Important Notes on afuse's Operation
 
 
 1. Abstract
 -----------
-Afuse is an automounting file system implemented in user-space using
-FUSE. Afuse currently implements the most basic functionality that can
-be expected by an automounter; that is it manages a directory of virtual
-directories. If one of these virtual directories is accessed and is not
-already automounted, afuse will attempt to mount a filesystem onto that
-directory. If the mount succeeds the requested access proceeds as normal,
-otherwise it will fail with an error. See the example below for a specific
-usage scenario.
+afuse is an automounting file system implemented in user-space using FUSE.
+afuse currently implements the most basic functionality that can be expected by
+an automounter; that is it manages a directory of virtual directories. If one
+of these virtual directories is accessed and is not already automounted, afuse
+will attempt to mount a filesystem onto that directory. If the mount succeeds
+the requested access proceeds as normal, otherwise it will fail with an error.
+See the example below for a specific usage scenario.
 
-The advantage of using afuse over traditional automounters is that afuse
-is designed to run entirely in user-space by individual users. This way an
-automounting action can take advantage of the invoking users environment,
-for example allowing access to an ssh-agent for password-less sshfs
-mounts, or allowing access to a graphical environment to get user input
-to complete a mount (i.e. popping up a window asking for a password).
+The advantage of using afuse over traditional automounters is afuse runs
+entirely in user-space by individual users. Thus it can take advantage of the
+invoking users environment, for example allowing access to an ssh-agent for
+password-less sshfs mounts, or allowing access to a graphical environment to
+get user input to complete a mount such as asking for a password.
 
-As this is a very early release of afuse operation is not yet optimal
-and many features are missing. If you are interested in plans for
-afuse or would like to contribute please see the HACKING file.
+afuse is distributed under the GPL license, details of which can be found in
+the COPYING file. Particularly, please note that while afuse is intended to be
+useful it is provided with ABSOLUTELY NO WARRANTY.
 
-The latest version of afuse can be found at http://afuse.sourceforge.net/
-
-Afuse is distributed under the GPL license, details of which can be
-found in the COPYING file. Particularly, please note that while afuse
-is intended to be useful it is provided with ABSOLUTELY NO WARRANTY.
+If you are interested in contributing to afuse, please read the HACKING file.
 
 
-2. Example Usage
-----------------
+2. Basic Usage
+--------------
 Example invocation using sshfs:
 
 	afuse -o mount_template="sshfs %r:/ %m" \
@@ -60,28 +56,56 @@ using something like ssh-agent.
 
 Alternatively, if want interactivity, add -f to the afuse invocation.
 
-If in addition to sshfs you have avahi-browser in your PATH, you can use
-the following example:
 
-	sshnet mountpoint/
+3. Pre-populating afuse Root
+----------------------------
+By default the afuse root directory is empty until a specific access is made to
+a directory leading to successful mount. In some cases it may be useful to
+pre-populate the afuse root with valid directory names.
 
-This script will use avahi to automatically populate the root directory
-with hosts that advertise their sftp service.
+To enable root directory pre-population, use the -o populate_root_command
+option to specify a command which will provide a list of directory names to
+populate the root with.  This program will be run for every directory list
+request on the afuse root directory, and should output one dir entry per-line
+to stdout. As this program is called repeatedly and for every directory
+listing it should not block/pause for an unreasonable amount of time.
+
+Note that when using this mode no actual mounting occurs until a directory
+access is made to one of the potential mount-points.
+
+An example of this usage is provided in the afuse-avahissh shell script
+(typically installed alongside afuse). This can be started as follows:
+
+	afuse-avahissh mountpoint/
+
+This script will use avahi to automatically populate the root directory with
+hosts advertising their sftp service via Avahi. To work correctly both sshfs
+and avahi-browse must be installed and available to the script.
 
 
-3. Notes on Afuse's Operation
------------------------------
+4. Misc Other Features
+----------------------
+* By default afuse does not attempt to mount a directory on a getattr
+  operation. This can be disabled using the -o exact_getattr option. This
+  allows getattr to return accurate information but may cause spurious mounts
+  when programs are just checking for the existence of files.
+
+* The -o flushwrites option causes write operation on file-systems mounted by 
+  afuse to operate synchronously.
+
+
+5. Important Notes on afuse's Operation
+---------------------------------------
 One of the most important things to note about afuse's operation is that
-automounted filesystems accessed through afuse are actually accessed
-by proxy.  Actual mounts are created in an instance specific  directory
-in /tmp. _ALL_ accesses to automounted filesystems apparently managed by
-afuse go through afuse and are proxied onto the real filesystem mounts
-as appropriate.
+automounted filesystems accessed through afuse are actually accessed by proxy.
+Actual mounts are created in an instance specific  directory in /tmp. _ALL_
+accesses to automounted filesystems apparently managed by afuse go through
+afuse and are proxied onto the real filesystem mounts as appropriate.
 
 While this shouldn't cause any operational problems, it does mean that
-operations on afuse automunted filesystems have considerable overhead.
-It can also mean that if afuse is not shutdown cleanly (via an unmount
-of the afuse filesystem) a stale directory can be left in /tmp of the
-form afuse-XXXXXX (where the X's are random characters).
+operations on afuse automounted filesystems have considerable overhead.  It can
+also mean that if afuse is not shutdown cleanly (via an unmount of the afuse
+filesystem) a stale directory can be left in /tmp of the form afuse-XXXXXX
+(where the X's are random characters).
 
 Hopefully these limitations will be removed in later revisions of afuse.
