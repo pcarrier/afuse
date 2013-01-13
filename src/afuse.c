@@ -39,7 +39,7 @@
 #include <fuse_opt.h>
 #ifndef __USE_BSD
 // for mkdtemp
-#  define __USE_BSD
+#define __USE_BSD
 #endif
 #include <stdlib.h>
 #include <stdio.h>
@@ -59,6 +59,10 @@
 #include <fnmatch.h>
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
+
+#if !HAVE_GETLINE && !HAVE_FGETLN
+#error Need getline or fgetln
+#endif
 
 #ifdef XATTR_NOFOLLOW
 #define lgetxattr(p, n, v, s) \
@@ -131,6 +135,11 @@ static mount_filter_list_t *mount_filter_list = NULL;
 #define UNBLOCK_SIGALRM \
 	sigprocmask(SIG_SETMASK, &block_sigalrm_oldset, NULL)
 
+#define DEFAULT_CASE_INVALID_ENUM  \
+		fprintf(stderr, "Unexpected switch value in %s:%s:%d\n", \
+			__FILE__, __func__, __LINE__);  \
+		exit(1);
+
 static auto_unmount_ph_t auto_unmount_ph;
 static int64_t auto_unmount_next_timeout = INT64_MAX;
 
@@ -173,29 +182,28 @@ static void load_mount_filter_file(const char *filename)
 	ssize_t llen;
 	size_t lsize;
 #ifdef HAVE_GETLINE
-	while ((llen = getline(&line, &lsize, filter_file)) != -1) {
-#elif HAVE_FGETLN
-	while (line = fgetln(filter_file, &llen)) {
-#else
-#  error Need getline or fgetln
+	while ((llen = getline(&line, &lsize, filter_file)) != -1)
+#else				// HAVE_FGETLN
+	while (line = fgetln(filter_file, &llen))
 #endif
-	if (llen >= 1) {
-		if (line[0] == '#')
-			continue;
+	{
+		if (llen >= 1) {
+			if (line[0] == '#')
+				continue;
 
-		if (line[llen - 1] == '\n') {
-			line[llen - 1] = '\0';
-			llen--;
+			if (line[llen - 1] == '\n') {
+				line[llen - 1] = '\0';
+				llen--;
+			}
 		}
+
+		if (llen > 0)
+			add_mount_filter(line);
 	}
 
-	if (llen > 0)
-		add_mount_filter(line);
-}
+	free(line);
 
-free(line);
-
-fclose(filter_file);
+	fclose(filter_file);
 }
 
 static int64_t from_timeval(const struct timeval *tv)
@@ -691,6 +699,9 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lstat(real_path, stbuf));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -728,6 +739,9 @@ static int afuse_readlink(const char *path, char *buf, size_t size)
 		buf[res] = '\0';
 		retval = 0;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -768,6 +782,9 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 			dir_list_add(&mount->dir_list, dp);
 		retval = 0;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -780,14 +797,13 @@ static inline DIR *get_dirp(struct fuse_file_info *fi)
 	return (DIR *) (uintptr_t) fi->fh;
 }
 
-int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
+int populate_root_dir(char *pop_cmd, struct list_t **dir_entry_listptr,
 		      fuse_fill_dir_t filler, void *buf)
 {
-	int err, e;
 	FILE *browser;
 	size_t hsize = 0;
 	ssize_t hlen;
-	char *host = NULL;
+	char *dir_entry = NULL;
 
 	if (!pop_cmd)
 		return -1;
@@ -797,39 +813,45 @@ int populate_root_dir(char *pop_cmd, struct list_t **host_listptr,
 			pop_cmd);
 		return -errno;
 	}
+
+	int loop_error = 0;
 #ifdef HAVE_GETLINE
-	while ((hlen = getline(&host, &hsize, browser)) != -1) {
-#elif HAVE_FGETLN
-	while (host = fgetln(browser, &hsize)) {
-#else
-#  error Need getline or fgetln
+	while ((hlen = getline(&dir_entry, &hsize, browser)) != -1)
+#else				// HAVE_FGETLN
+	while (dir_entry = fgetln(browser, &hsize))
 #endif
-	if (hlen >= 1 && host[hlen - 1] == '\n')
-		host[hlen - 1] = '\0';
+	{
+		if (hlen >= 1 && dir_entry[hlen - 1] == '\n')
+			dir_entry[hlen - 1] = '\0';
 
-	fprintf(stderr, "Got entry \"%s\"\n", host);
+		fprintf(stderr, "Got entry \"%s\"\n", dir_entry);
 
-	err = insert_sorted_if_unique(host_listptr, host);
-	if (err == 1)		// already in list
-		continue;
-	else if (err)
-		e = err;
+		int insert_err =
+		    insert_sorted_if_unique(dir_entry_listptr, dir_entry);
+		if (insert_err == 1)	// already in list
+			continue;
+		else if (insert_err) {
+			fprintf(stderr,
+				"populate_root_command: failed on inserting new entry into sorted list.\n");
+			loop_error = 1;
+		}
 
-	if (strlen(host) != 0)
-		filler(buf, host, NULL, 0);
-}
+		if (strlen(dir_entry) != 0)
+			filler(buf, dir_entry, NULL, 0);
+	}
 
-free(host);
+	free(dir_entry);
 
-err = pclose(browser);
-if (err && !e) {
-	e = -errno;
-	fprintf(stderr,
-		"populate_root_command failed, ret %d, status %d, errno %d (%s)\n",
-		err, WEXITSTATUS(err), -e, strerror(-e));
-}
+	int pclose_err = pclose(browser);
+	if (pclose_err) {
+		int pclose_errno = errno;
+		fprintf(stderr,
+			"populate_root_command: pclose failed, ret %d, status %d, errno %d (%s)\n",
+			pclose_errno, WEXITSTATUS(pclose_errno), pclose_errno,
+			strerror(pclose_errno));
+	}
 
-return e;
+	return loop_error || pclose_err;
 }
 
 static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -839,7 +861,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	struct dirent *de;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
-	struct list_t *host_list = NULL;
+	struct list_t *dir_entry_list = NULL;
 	mount_list_t *mount, *next;
 	int retval;
 	BLOCK_SIGALRM;
@@ -852,8 +874,8 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	case PROC_PATH_ROOT_DIR:
 		filler(buf, ".", NULL, 0);
 		filler(buf, "..", NULL, 0);
-		insert_sorted_if_unique(&host_list, ".");
-		insert_sorted_if_unique(&host_list, "..");
+		insert_sorted_if_unique(&dir_entry_list, ".");
+		insert_sorted_if_unique(&dir_entry_list, "..");
 		for (mount = mount_list; mount; mount = next) {
 			next = mount->next;
 			/* Check for dead mounts. */
@@ -861,14 +883,14 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				do_umount(mount);
 			} else {
 				if (insert_sorted_if_unique
-				    (&host_list, mount->root_name))
+				    (&dir_entry_list, mount->root_name))
 					retval = -1;
 				filler(buf, mount->root_name, NULL, 0);
 			}
 		}
 		populate_root_dir(user_options.populate_root_command,
-				  &host_list, filler, buf);
-		destroy_list(&host_list);
+				  &dir_entry_list, filler, buf);
+		destroy_list(&dir_entry_list);
 		mount = NULL;
 		retval = 0;
 		break;
@@ -890,6 +912,9 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		}
 		retval = 0;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -923,6 +948,9 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 		if (dp)
 			closedir(dp);
 		retval = 0;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -955,6 +983,9 @@ static int afuse_mknod(const char *path, mode_t mode, dev_t rdev)
 		else
 			retval = get_retval(mknod(real_path, mode, rdev));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -981,6 +1012,9 @@ static int afuse_mkdir(const char *path, mode_t mode)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(mkdir(real_path, mode));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1007,6 +1041,9 @@ static int afuse_unlink(const char *path)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(unlink(real_path));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1045,6 +1082,9 @@ static int afuse_rmdir(const char *path)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(rmdir(real_path));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1071,6 +1111,9 @@ static int afuse_symlink(const char *from, const char *to)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(symlink(from, real_to_path));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1090,6 +1133,7 @@ static int afuse_rename(const char *from, const char *to)
 
 	switch (process_path
 		(from, real_from_path, root_name_from, 0, &mount_from)) {
+
 	case PROC_PATH_FAILED:
 		retval = -ENXIO;
 		break;
@@ -1102,6 +1146,7 @@ static int afuse_rename(const char *from, const char *to)
 	case PROC_PATH_PROXY_DIR:
 		switch (process_path
 			(to, real_to_path, root_name_to, 0, &mount_to)) {
+
 		case PROC_PATH_FAILED:
 			retval = -ENXIO;
 			break;
@@ -1115,8 +1160,14 @@ static int afuse_rename(const char *from, const char *to)
 			retval =
 			    get_retval(rename(real_from_path, real_to_path));
 			break;
+
+		default:
+			DEFAULT_CASE_INVALID_ENUM;
 		}
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount_to)
 		update_auto_unmount(mount_to);
@@ -1138,6 +1189,7 @@ static int afuse_link(const char *from, const char *to)
 
 	switch (process_path
 		(from, real_from_path, root_name_from, 0, &mount_from)) {
+
 	case PROC_PATH_FAILED:
 		retval = -ENXIO;
 		break;
@@ -1148,6 +1200,7 @@ static int afuse_link(const char *from, const char *to)
 	case PROC_PATH_PROXY_DIR:
 		switch (process_path
 			(to, real_to_path, root_name_to, 0, &mount_to)) {
+
 		case PROC_PATH_FAILED:
 			retval = -ENXIO;
 			break;
@@ -1158,8 +1211,14 @@ static int afuse_link(const char *from, const char *to)
 		case PROC_PATH_PROXY_DIR:
 			retval = get_retval(link(real_from_path, real_to_path));
 			break;
+
+		default:
+			DEFAULT_CASE_INVALID_ENUM;
 		}
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount_to)
 		update_auto_unmount(mount_to);
@@ -1188,6 +1247,9 @@ static int afuse_chmod(const char *path, mode_t mode)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(chmod(real_path, mode));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1214,6 +1276,9 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lchown(real_path, uid, gid));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1240,6 +1305,9 @@ static int afuse_truncate(const char *path, off_t size)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(truncate(real_path, size));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1270,6 +1338,9 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(utime(real_path, buf));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1306,6 +1377,9 @@ static int afuse_open(const char *path, struct fuse_file_info *fi)
 			fd_list_add(&mount->fd_list, fd);
 		retval = 0;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1402,6 +1476,9 @@ static int afuse_access(const char *path, int mask)
 		else
 			retval = -EACCES;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1443,6 +1520,9 @@ static int afuse_create(const char *path, mode_t mode,
 		fi->fh = fd;
 		retval = 0;
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1500,6 +1580,9 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(statvfs(real_path, stbuf));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1540,6 +1623,9 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
 		retval =
 		    get_retval(lsetxattr(real_path, name, value, size, flags));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1571,6 +1657,9 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lgetxattr(real_path, name, value, size));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1601,6 +1690,9 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(llistxattr(real_path, list, size));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1631,6 +1723,9 @@ static int afuse_removexattr(const char *path, const char *name)
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lremovexattr(real_path, name));
 		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
 	}
 	if (mount)
 		update_auto_unmount(mount);
@@ -1725,7 +1820,7 @@ static void usage(const char *progname)
 		" (2) - The unmount command must perform a lazy unmount operation. E.g. the\n"
 		"       -u -z options to fusermount, or -l for regular mount.\n"
 		"\n"
-		" (3) - The populate_root command is expected to return one hostname per line,\n"
+		" (3) - The populate_root command should output one dir entry per line,\n"
 		"       and return immediately. It is run for each directory listing request.\n"
 		"\n"
 		" (4) - Each line of the filter file is a shell wildcard filter (glob). A '#'\n"
