@@ -1856,8 +1856,6 @@ int main(int argc, char *argv[])
 	char *temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
 	strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
 
-	add_mount_filter("autorun.inf");
-
 	if (fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) ==
 	    -1)
 		return 1;

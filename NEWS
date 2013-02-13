@@ -1,3 +1,7 @@
+Version 0.4.1
+-------------
+* Fix bug where afuse crashes on release
+
 Version 0.4
 -----------
 * Mac OS X 10.6+ and FreeBSD are supported.
