@@ -931,6 +931,7 @@ static int afuse_releasedir(const char *path, struct fuse_file_info *fi)
 		if (dp)
 			closedir(dp);
 		retval = 0;
+		break;
 
 	default:
 		DEFAULT_CASE_INVALID_ENUM;
