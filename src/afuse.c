@@ -67,6 +67,7 @@
 #include "variable_pairing_heap.h"
 
 #define TMP_DIR_TEMPLATE "/tmp/afuse-XXXXXX"
+#define TMP_DIR_TEMPLATE2 "/afuse-XXXXXX"
 static char *mount_point_directory;
 static dev_t mount_point_dev;
 
@@ -79,8 +80,9 @@ struct user_options_t {
 	bool flush_writes;
 	bool exact_getattr;
 	uint64_t auto_unmount_delay;
+	char *mount_dir;
 } user_options = {
-NULL, NULL, NULL, NULL, false, false, UINT64_MAX};
+NULL, NULL, NULL, NULL, false, false, UINT64_MAX, NULL};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -1769,6 +1771,7 @@ static struct fuse_opt afuse_opts[] = {
 	AFUSE_OPT("unmount_template=%s", unmount_command_template, 0),
 	AFUSE_OPT("populate_root_command=%s", populate_root_command, 0),
 	AFUSE_OPT("filter_file=%s", filter_file, 0),
+	AFUSE_OPT("mount_dir=%s", mount_dir, 0),
 
 	AFUSE_OPT("timeout=%llu", auto_unmount_delay, 0),
 
@@ -1797,6 +1800,7 @@ static void usage(const char *progname)
 		"    -o timeout=TIMEOUT            automatically unmount after TIMEOUT seconds\n"
 		"    -o flushwrites                flushes data to disk for all file writes\n"
 		"    -o exact_getattr              allows getattr calls to cause a mount\n" 
+		"    -o mount_dir=DIR              place temporary mounts under DIR (default: /tmp)\n"
 		"\n\n"
 		" (1) - When executed, %%r and %%m are expanded in templates to the root\n"
 		"       directory name for the new mount point, and the actual directory to\n"
@@ -1852,9 +1856,8 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 
 int main(int argc, char *argv[])
 {
+    char *temp_dir_name;
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	char *temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
-	strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
 
 	if (fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) ==
 	    -1)
@@ -1880,6 +1883,17 @@ int main(int argc, char *argv[])
 		while (sigaction(SIGALRM, &act, NULL) == -1 && errno == EINTR)
 			continue;
 	}
+
+	if (!user_options.mount_dir){
+        temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
+        strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
+    }else{
+        temp_dir_name = my_malloc(strlen(user_options.mount_dir)+strlen(TMP_DIR_TEMPLATE2));
+        strcpy(temp_dir_name, user_options.mount_dir);
+        strcpy(temp_dir_name+strlen(user_options.mount_dir), TMP_DIR_TEMPLATE2);
+    }
+    fprintf(stderr, "dir: %s\n", temp_dir_name); 
+    return 1;
 
 	// Check for required parameters
 	if (!user_options.mount_command_template
