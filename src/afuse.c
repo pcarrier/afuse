@@ -1892,8 +1892,6 @@ int main(int argc, char *argv[])
         strcpy(temp_dir_name, user_options.mount_dir);
         strcpy(temp_dir_name+strlen(user_options.mount_dir), TMP_DIR_TEMPLATE2);
     }
-    fprintf(stderr, "dir: %s\n", temp_dir_name); 
-    return 1;
 
 	// Check for required parameters
 	if (!user_options.mount_command_template
