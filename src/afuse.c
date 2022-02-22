@@ -1885,15 +1885,18 @@ int main(int argc, char *argv[])
 	}
 
 	if (!user_options.mount_dir) {
-		temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
-		strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
+        size_t buflen = strlen(TMP_DIR_TEMPLATE);
+        temp_dir_name = my_malloc(buflen+1);
+        temp_dir_name[buflen] = '\0';
+        strncpy(temp_dir_name, TMP_DIR_TEMPLATE, buflen);
 	} else {
-		temp_dir_name =
-		    my_malloc(strlen(user_options.mount_dir) +
-			      strlen(TMP_DIR_TEMPLATE2));
-		strcpy(temp_dir_name, user_options.mount_dir);
-		strcpy(temp_dir_name + strlen(user_options.mount_dir),
-		       TMP_DIR_TEMPLATE2);
+        size_t buflen1 = strlen(user_options.mount_dir);
+        size_t buflen2 = strlen(TMP_DIR_TEMPLATE2);
+        temp_dir_name = my_malloc(buflen1+buflen2+1);
+        temp_dir_name[buflen1+buflen2] = '\0';
+        strncpy(temp_dir_name, user_options.mount_dir, buflen1);
+        strncpy(temp_dir_name + strlen(user_options.mount_dir),
+                TMP_DIR_TEMPLATE2, buflen2);
 	}
 
 	// Check for required parameters
