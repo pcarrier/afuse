@@ -82,7 +82,8 @@ struct user_options_t {
 	uint64_t auto_unmount_delay;
 	char *mount_dir;
 } user_options = {
-NULL, NULL, NULL, NULL, false, false, UINT64_MAX, NULL};
+	NULL, NULL, NULL, NULL, false, false, UINT64_MAX, NULL
+};
 
 typedef struct _mount_list_t {
 	struct _mount_list_t *next;
@@ -108,7 +109,6 @@ typedef struct _mount_filter_list_t {
 PH_DECLARE_TYPE(auto_unmount_ph, mount_list_t)
     PH_DEFINE_TYPE(auto_unmount_ph, mount_list_t, auto_unmount_ph_node,
 	       auto_unmount_time)
-
 static mount_filter_list_t *mount_filter_list = NULL;
 
 #define BLOCK_SIGALRM \
@@ -1799,12 +1799,12 @@ static void usage(const char *progname)
 		"    -o filter_file=FILE           FILE listing ignore filters for mount points (4)\n"
 		"    -o timeout=TIMEOUT            automatically unmount after TIMEOUT seconds\n"
 		"    -o flushwrites                flushes data to disk for all file writes\n"
-		"    -o exact_getattr              allows getattr calls to cause a mount\n" 
+		"    -o exact_getattr              allows getattr calls to cause a mount\n"
 		"    -o mount_dir=DIR              place temporary mounts under DIR (default: /tmp)\n"
 		"\n\n"
-		" (1) - When executed, %%r and %%m are expanded in templates to the root\n"
-		"       directory name for the new mount point, and the actual directory to\n"
-		"       mount onto respectively to mount onto. Both templates are REQUIRED.\n"
+		" (1) - When executed, %%r is expanded to the directory name inside the\n"
+		"       afuse mount, and %%m is expanded to the actual directory to mount\n"
+		"       onto. Both templates are REQUIRED.\n"
 		"\n"
 		" (2) - The unmount command must perform a lazy unmount operation. E.g. the\n"
 		"       -u -z options to fusermount, or -l for regular mount.\n"
@@ -1856,7 +1856,7 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 
 int main(int argc, char *argv[])
 {
-    char *temp_dir_name;
+	char *temp_dir_name;
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
 	if (fuse_opt_parse(&args, &user_options, afuse_opts, afuse_opt_proc) ==
@@ -1884,14 +1884,17 @@ int main(int argc, char *argv[])
 			continue;
 	}
 
-	if (!user_options.mount_dir){
-        temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
-        strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
-    }else{
-        temp_dir_name = my_malloc(strlen(user_options.mount_dir)+strlen(TMP_DIR_TEMPLATE2));
-        strcpy(temp_dir_name, user_options.mount_dir);
-        strcpy(temp_dir_name+strlen(user_options.mount_dir), TMP_DIR_TEMPLATE2);
-    }
+	if (!user_options.mount_dir) {
+		temp_dir_name = my_malloc(strlen(TMP_DIR_TEMPLATE));
+		strcpy(temp_dir_name, TMP_DIR_TEMPLATE);
+	} else {
+		temp_dir_name =
+		    my_malloc(strlen(user_options.mount_dir) +
+			      strlen(TMP_DIR_TEMPLATE2));
+		strcpy(temp_dir_name, user_options.mount_dir);
+		strcpy(temp_dir_name + strlen(user_options.mount_dir),
+		       TMP_DIR_TEMPLATE2);
+	}
 
 	// Check for required parameters
 	if (!user_options.mount_command_template
