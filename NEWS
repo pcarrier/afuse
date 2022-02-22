@@ -1,3 +1,9 @@
+Version 0.5.0
+-------------
+
+* Adds the -o mount_dir=DIR option, which allows users to specify a directory
+  under which all temporary mounts are made.
+
 Version 0.4.1
 -------------
 * Fix bug where afuse crashes on release
