@@ -8,7 +8,6 @@
 	This program can be distributed under the terms of the GNU GPL.
 	See the file COPYING.
 */
-
 #include <config.h>
 
 #ifdef linux
@@ -18,8 +17,15 @@
 #define _GNU_SOURCE
 #endif
 
+#ifdef HAVE_FUSE3
+#include <fuse3/fuse.h>
+#else
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 26
+#endif
 #include <fuse.h>
 #include <fuse_opt.h>
+#endif
 #ifndef __USE_BSD
 // for mkdtemp
 #define __USE_BSD
@@ -58,6 +64,12 @@
          removexattr(p, n, XATTR_NOFOLLOW)
 #endif				/* XATTR_NOFOLLOW */
 #endif				/* HAVE_SETXATTR */
+
+#ifdef HAVE_FUSE3
+#define FILLER(filler, buf, name, st, off) filler(buf, name, st, off, 0)
+#else
+#define FILLER(filler, buf, name, st, off) filler(buf, name, st, off)
+#endif
 
 #include "fd_list.h"
 #include "dir_list.h"
@@ -631,8 +643,14 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 		return PROC_PATH_ROOT_DIR;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
+{
+	(void)fi;
+#else
 static int afuse_getattr(const char *path, struct stat *stbuf)
 {
+#endif
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	int retval;
@@ -680,6 +698,7 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 			retval = 0;
 			break;
 		}
+		/* fallthrough */
 
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lstat(real_path, stbuf));
@@ -715,6 +734,7 @@ static int afuse_readlink(const char *path, char *buf, size_t size)
 			retval = -ENOENT;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		res = readlink(real_path, buf, size - 1);
 		if (res == -1) {
@@ -756,6 +776,7 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 			fi->fh = 0lu;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		dp = opendir(real_path);
 		if (dp == NULL) {
@@ -822,7 +843,7 @@ int populate_root_dir(char *pop_cmd, struct list_t **dir_entry_listptr,
 		}
 
 		if (strlen(dir_entry) != 0)
-			filler(buf, dir_entry, NULL, 0);
+			FILLER(filler, buf, dir_entry, NULL, 0);
 	}
 
 	free(dir_entry);
@@ -839,9 +860,17 @@ int populate_root_dir(char *pop_cmd, struct list_t **dir_entry_listptr,
 	return loop_error || pclose_err;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+			 off_t offset, struct fuse_file_info *fi,
+			 enum fuse_readdir_flags flags)
+{
+	(void) flags;
+#else
 static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi)
 {
+#endif
 	DIR *dp = get_dirp(fi);
 	struct dirent *de;
 	char *root_name = alloca(strlen(path));
@@ -857,8 +886,8 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		break;
 
 	case PROC_PATH_ROOT_DIR:
-		filler(buf, ".", NULL, 0);
-		filler(buf, "..", NULL, 0);
+		FILLER(filler, buf, ".", NULL, 0);
+		FILLER(filler, buf, "..", NULL, 0);
 		insert_sorted_if_unique(&dir_entry_list, ".");
 		insert_sorted_if_unique(&dir_entry_list, "..");
 		for (mount = mount_list; mount; mount = next) {
@@ -870,7 +899,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				if (insert_sorted_if_unique
 				    (&dir_entry_list, mount->root_name))
 					retval = -1;
-				filler(buf, mount->root_name, NULL, 0);
+				FILLER(filler, buf, mount->root_name, NULL, 0);
 			}
 		}
 		populate_root_dir(user_options.populate_root_command,
@@ -885,6 +914,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			retval = (!dp) ? -EBADF : -EACCES;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		seekdir(dp, offset);
 		while ((de = readdir(dp)) != NULL) {
@@ -892,7 +922,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			memset(&st, 0, sizeof(st));
 			st.st_ino = de->d_ino;
 			st.st_mode = de->d_type << 12;
-			if (filler(buf, de->d_name, &st, telldir(dp)))
+			if (FILLER(filler, buf, de->d_name, &st, telldir(dp)))
 				break;
 		}
 		retval = 0;
@@ -1107,8 +1137,15 @@ static int afuse_symlink(const char *from, const char *to)
 	return retval;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_rename(const char *from, const char *to, unsigned int flags)
+{
+	if (flags)
+		return -EINVAL;
+#else
 static int afuse_rename(const char *from, const char *to)
 {
+#endif
 	char *root_name_from = alloca(strlen(from));
 	char *root_name_to = alloca(strlen(to));
 	char *real_from_path = alloca(max_path_out_len(from));
@@ -1214,8 +1251,14 @@ static int afuse_link(const char *from, const char *to)
 	return retval;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+	(void)fi;
+#else
 static int afuse_chmod(const char *path, mode_t mode)
 {
+#endif
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1243,8 +1286,14 @@ static int afuse_chmod(const char *path, mode_t mode)
 	return retval;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
+{
+	(void)fi;
+#else
 static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 {
+#endif
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1272,8 +1321,14 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 	return retval;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_truncate(const char *path, off_t size, struct fuse_file_info *fi)
+{
+	(void)fi;
+#else
 static int afuse_truncate(const char *path, off_t size)
 {
+#endif
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1301,6 +1356,42 @@ static int afuse_truncate(const char *path, off_t size)
 	return retval;
 }
 
+#ifdef HAVE_FUSE3
+static int afuse_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
+{
+	(void)fi;
+	char *root_name = alloca(strlen(path));
+	char *real_path = alloca(max_path_out_len(path));
+	mount_list_t *mount;
+	int retval;
+	BLOCK_SIGALRM;
+
+	switch (process_path(path, real_path, root_name, 0, &mount)) {
+	case PROC_PATH_FAILED:
+		retval = -ENXIO;
+		break;
+	case PROC_PATH_ROOT_DIR:
+		retval = -ENOTSUP;
+		break;
+	case PROC_PATH_ROOT_SUBDIR:
+		if (!mount) {
+			retval = -ENOTSUP;
+			break;
+		}
+		/* fallthrough */
+	case PROC_PATH_PROXY_DIR:
+		retval = get_retval(utimensat(AT_FDCWD, real_path, tv, AT_SYMLINK_NOFOLLOW));
+		break;
+
+	default:
+		DEFAULT_CASE_INVALID_ENUM;
+	}
+	if (mount)
+		update_auto_unmount(mount);
+	UNBLOCK_SIGALRM;
+	return retval;
+}
+#else
 static int afuse_utime(const char *path, struct utimbuf *buf)
 {
 	char *root_name = alloca(strlen(path));
@@ -1321,6 +1412,7 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(utime(real_path, buf));
 		break;
@@ -1333,6 +1425,7 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 	UNBLOCK_SIGALRM;
 	return retval;
 }
+#endif
 
 static int afuse_open(const char *path, struct fuse_file_info *fi)
 {
@@ -1472,12 +1565,14 @@ static int afuse_access(const char *path, int mask)
 	return retval;
 }
 
+#ifndef HAVE_FUSE3
 static int afuse_ftruncate(const char *path, off_t size,
 			   struct fuse_file_info *fi)
 {
 	(void)path;
 	return get_retval(ftruncate(fi->fh, size));
 }
+#endif
 
 static int afuse_create(const char *path, mode_t mode,
 			struct fuse_file_info *fi)
@@ -1516,6 +1611,7 @@ static int afuse_create(const char *path, mode_t mode,
 	return retval;
 }
 
+#ifndef HAVE_FUSE3
 static int afuse_fgetattr(const char *path, struct stat *stbuf,
 			  struct fuse_file_info *fi)
 {
@@ -1523,6 +1619,7 @@ static int afuse_fgetattr(const char *path, struct stat *stbuf,
 
 	return get_retval(fstat(fi->fh, stbuf));
 }
+#endif
 #endif
 
 #if FUSE_VERSION >= 25
@@ -1563,6 +1660,7 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 			retval = -EACCES;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(statvfs(real_path, stbuf));
 		break;
@@ -1605,6 +1703,7 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval =
 		    get_retval(lsetxattr(real_path, name, value, size, flags));
@@ -1640,6 +1739,7 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lgetxattr(real_path, name, value, size));
 		break;
@@ -1673,6 +1773,7 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(llistxattr(real_path, list, size));
 		break;
@@ -1706,6 +1807,7 @@ static int afuse_removexattr(const char *path, const char *name)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fallthrough */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lremovexattr(real_path, name));
 		break;
@@ -1736,7 +1838,11 @@ static struct fuse_operations afuse_oper = {
 	.chmod = afuse_chmod,
 	.chown = afuse_chown,
 	.truncate = afuse_truncate,
+#ifdef HAVE_FUSE3
+	.utimens = afuse_utimens,
+#else
 	.utime = afuse_utime,
+#endif
 	.open = afuse_open,
 	.read = afuse_read,
 	.write = afuse_write,
@@ -1746,8 +1852,10 @@ static struct fuse_operations afuse_oper = {
 #if FUSE_VERSION >= 25
 	.access = afuse_access,
 	.create = afuse_create,
+#ifndef HAVE_FUSE3
 	.ftruncate = afuse_ftruncate,
 	.fgetattr = afuse_fgetattr,
+#endif
 #endif
 	.destroy = afuse_destroy,
 #ifdef HAVE_SETXATTR
@@ -1838,7 +1946,11 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 	case KEY_HELP:
 		usage(outargs->argv[0]);
 		fuse_opt_add_arg(outargs, "-ho");
+#ifdef HAVE_FUSE3
+		fuse_main(outargs->argc, outargs->argv, &afuse_oper, NULL);
+#else
 		fuse_main(outargs->argc, outargs->argv, &afuse_oper);
+#endif
 		exit(1);
 
 	case KEY_FLUSHWRITES:
@@ -1905,7 +2017,11 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "(Un)Mount command templates missing.\n\n");
 		usage(argv[0]);
 		fuse_opt_add_arg(&args, "-ho");
+#ifdef HAVE_FUSE3
+		fuse_main(args.argc, args.argv, &afuse_oper, NULL);
+#else
 		fuse_main(args.argc, args.argv, &afuse_oper);
+#endif
 
 		return 1;
 	}
@@ -1932,5 +2048,9 @@ int main(int argc, char *argv[])
 	umask(0);
 
 	// !!FIXME!! death by signal doesn't unmount fs
+#ifdef HAVE_FUSE3
+	return fuse_main(args.argc, args.argv, &afuse_oper, NULL);
+#else
 	return fuse_main(args.argc, args.argv, &afuse_oper);
+#endif
 }

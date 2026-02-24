@@ -4,6 +4,7 @@
 AC_PREREQ(2.59)
 AC_INIT([afuse], [0.5.0])
 
+AC_USE_SYSTEM_EXTENSIONS
 AM_INIT_AUTOMAKE
 AC_PROG_RANLIB
 
@@ -15,8 +16,17 @@ AC_PROG_CC
 
 # Checks for libraries.
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-PKG_CHECK_MODULES([FUSE], [fuse >= 2.3])
-CFLAGS="$CFLAGS -Wall -Wextra $FUSE_CFLAGS -DFUSE_USE_VERSION=25"
+
+PKG_CHECK_MODULES([FUSE], [fuse3], [
+    AC_DEFINE([HAVE_FUSE3], [1], [Define if you have fuse3])
+    FUSE_VERSION=31
+], [
+    PKG_CHECK_MODULES([FUSE], [fuse >= 2.3], [
+        FUSE_VERSION=25
+    ])
+])
+
+CFLAGS="$CFLAGS -Wall -Wextra $FUSE_CFLAGS -DFUSE_USE_VERSION=$FUSE_VERSION"
 LIBS="$FUSE_LIBS"
 
 # Check if we need to enable compatibility code for old FUSE versions
