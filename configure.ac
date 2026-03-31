@@ -13,10 +13,13 @@ AC_CONFIG_HEADERS([config.h])
 # Checks for programs.
 AC_PROG_CC
 
+# Enable large file support (required by FUSE3 on 32-bit platforms)
+AC_SYS_LARGEFILE
+
 # Checks for libraries.
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-PKG_CHECK_MODULES([FUSE], [fuse >= 2.3])
-CFLAGS="$CFLAGS -Wall -Wextra $FUSE_CFLAGS -DFUSE_USE_VERSION=25"
+PKG_CHECK_MODULES([FUSE], [fuse3])
+CFLAGS="$CFLAGS -Wall -Wextra $FUSE_CFLAGS -DFUSE_USE_VERSION=31"
 LIBS="$FUSE_LIBS"
 
 # Check if we need to enable compatibility code for old FUSE versions
