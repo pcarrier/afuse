@@ -680,7 +680,7 @@ static int afuse_getattr(const char *path, struct stat *stbuf)
 			retval = 0;
 			break;
 		}
-
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lstat(real_path, stbuf));
 		break;
@@ -715,6 +715,7 @@ static int afuse_readlink(const char *path, char *buf, size_t size)
 			retval = -ENOENT;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		res = readlink(real_path, buf, size - 1);
 		if (res == -1) {
@@ -756,6 +757,7 @@ static int afuse_opendir(const char *path, struct fuse_file_info *fi)
 			fi->fh = 0lu;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		dp = opendir(real_path);
 		if (dp == NULL) {
@@ -885,6 +887,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			retval = (!dp) ? -EBADF : -EACCES;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		seekdir(dp, offset);
 		while ((de = readdir(dp)) != NULL) {
@@ -1321,6 +1324,7 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(utime(real_path, buf));
 		break;
@@ -1563,6 +1567,7 @@ static int afuse_statfs(const char *path, struct statfs *stbuf)
 			retval = -EACCES;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(statvfs(real_path, stbuf));
 		break;
@@ -1605,6 +1610,7 @@ static int afuse_setxattr(const char *path, const char *name, const char *value,
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval =
 		    get_retval(lsetxattr(real_path, name, value, size, flags));
@@ -1640,6 +1646,7 @@ static int afuse_getxattr(const char *path, const char *name, char *value,
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lgetxattr(real_path, name, value, size));
 		break;
@@ -1673,6 +1680,7 @@ static int afuse_listxattr(const char *path, char *list, size_t size)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(llistxattr(real_path, list, size));
 		break;
@@ -1706,6 +1714,7 @@ static int afuse_removexattr(const char *path, const char *name)
 			retval = -ENOTSUP;
 			break;
 		}
+		/* fall through */
 	case PROC_PATH_PROXY_DIR:
 		retval = get_retval(lremovexattr(real_path, name));
 		break;
@@ -1888,15 +1897,14 @@ int main(int argc, char *argv[])
         size_t buflen = strlen(TMP_DIR_TEMPLATE);
         temp_dir_name = my_malloc(buflen+1);
         temp_dir_name[buflen] = '\0';
-        strncpy(temp_dir_name, TMP_DIR_TEMPLATE, buflen);
+        memcpy(temp_dir_name, TMP_DIR_TEMPLATE, buflen);
 	} else {
         size_t buflen1 = strlen(user_options.mount_dir);
         size_t buflen2 = strlen(TMP_DIR_TEMPLATE2);
         temp_dir_name = my_malloc(buflen1+buflen2+1);
         temp_dir_name[buflen1+buflen2] = '\0';
-        strncpy(temp_dir_name, user_options.mount_dir, buflen1);
-        strncpy(temp_dir_name + strlen(user_options.mount_dir),
-                TMP_DIR_TEMPLATE2, buflen2);
+        memcpy(temp_dir_name, user_options.mount_dir, buflen1);
+        memcpy(temp_dir_name + buflen1, TMP_DIR_TEMPLATE2, buflen2);
 	}
 
 	// Check for required parameters
