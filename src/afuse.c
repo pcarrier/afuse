@@ -19,7 +19,6 @@
 #endif
 
 #include <fuse.h>
-#include <fuse_opt.h>
 #ifndef __USE_BSD
 // for mkdtemp
 #define __USE_BSD
@@ -631,8 +630,9 @@ proc_result_t process_path(const char *path_in, char *path_out, char *root_name,
 		return PROC_PATH_ROOT_DIR;
 }
 
-static int afuse_getattr(const char *path, struct stat *stbuf)
+static int afuse_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 {
+	(void) fi;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	int retval;
@@ -824,7 +824,7 @@ int populate_root_dir(char *pop_cmd, struct list_t **dir_entry_listptr,
 		}
 
 		if (strlen(dir_entry) != 0)
-			filler(buf, dir_entry, NULL, 0);
+			filler(buf, dir_entry, NULL, 0, 0);
 	}
 
 	free(dir_entry);
@@ -842,8 +842,10 @@ int populate_root_dir(char *pop_cmd, struct list_t **dir_entry_listptr,
 }
 
 static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-			 off_t offset, struct fuse_file_info *fi)
+			 off_t offset, struct fuse_file_info *fi,
+			 enum fuse_readdir_flags flags)
 {
+	(void) flags;
 	DIR *dp = get_dirp(fi);
 	struct dirent *de;
 	char *root_name = alloca(strlen(path));
@@ -859,8 +861,8 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		break;
 
 	case PROC_PATH_ROOT_DIR:
-		filler(buf, ".", NULL, 0);
-		filler(buf, "..", NULL, 0);
+		filler(buf, ".", NULL, 0, 0);
+		filler(buf, "..", NULL, 0, 0);
 		insert_sorted_if_unique(&dir_entry_list, ".");
 		insert_sorted_if_unique(&dir_entry_list, "..");
 		for (mount = mount_list; mount; mount = next) {
@@ -872,7 +874,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				if (insert_sorted_if_unique
 				    (&dir_entry_list, mount->root_name))
 					retval = -1;
-				filler(buf, mount->root_name, NULL, 0);
+				filler(buf, mount->root_name, NULL, 0, 0);
 			}
 		}
 		populate_root_dir(user_options.populate_root_command,
@@ -895,7 +897,7 @@ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			memset(&st, 0, sizeof(st));
 			st.st_ino = de->d_ino;
 			st.st_mode = de->d_type << 12;
-			if (filler(buf, de->d_name, &st, telldir(dp)))
+			if (filler(buf, de->d_name, &st, telldir(dp), 0))
 				break;
 		}
 		retval = 0;
@@ -1110,8 +1112,10 @@ static int afuse_symlink(const char *from, const char *to)
 	return retval;
 }
 
-static int afuse_rename(const char *from, const char *to)
+static int afuse_rename(const char *from, const char *to, unsigned int flags)
 {
+	if (flags)
+		return -EINVAL;
 	char *root_name_from = alloca(strlen(from));
 	char *root_name_to = alloca(strlen(to));
 	char *real_from_path = alloca(max_path_out_len(from));
@@ -1217,8 +1221,9 @@ static int afuse_link(const char *from, const char *to)
 	return retval;
 }
 
-static int afuse_chmod(const char *path, mode_t mode)
+static int afuse_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+	(void) fi;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1246,8 +1251,9 @@ static int afuse_chmod(const char *path, mode_t mode)
 	return retval;
 }
 
-static int afuse_chown(const char *path, uid_t uid, gid_t gid)
+static int afuse_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
 {
+	(void) fi;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1275,8 +1281,9 @@ static int afuse_chown(const char *path, uid_t uid, gid_t gid)
 	return retval;
 }
 
-static int afuse_truncate(const char *path, off_t size)
+static int afuse_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
+	(void) fi;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1304,8 +1311,9 @@ static int afuse_truncate(const char *path, off_t size)
 	return retval;
 }
 
-static int afuse_utime(const char *path, struct utimbuf *buf)
+static int afuse_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
 {
+	(void) fi;
 	char *root_name = alloca(strlen(path));
 	char *real_path = alloca(max_path_out_len(path));
 	mount_list_t *mount;
@@ -1326,7 +1334,7 @@ static int afuse_utime(const char *path, struct utimbuf *buf)
 		}
 		/* fall through */
 	case PROC_PATH_PROXY_DIR:
-		retval = get_retval(utime(real_path, buf));
+		retval = get_retval(utimensat(AT_FDCWD, real_path, tv, AT_SYMLINK_NOFOLLOW));
 		break;
 
 	default:
@@ -1476,13 +1484,6 @@ static int afuse_access(const char *path, int mask)
 	return retval;
 }
 
-static int afuse_ftruncate(const char *path, off_t size,
-			   struct fuse_file_info *fi)
-{
-	(void)path;
-	return get_retval(ftruncate(fi->fh, size));
-}
-
 static int afuse_create(const char *path, mode_t mode,
 			struct fuse_file_info *fi)
 {
@@ -1520,13 +1521,6 @@ static int afuse_create(const char *path, mode_t mode,
 	return retval;
 }
 
-static int afuse_fgetattr(const char *path, struct stat *stbuf,
-			  struct fuse_file_info *fi)
-{
-	(void)path;
-
-	return get_retval(fstat(fi->fh, stbuf));
-}
 #endif
 
 #if FUSE_VERSION >= 25
@@ -1745,7 +1739,7 @@ static struct fuse_operations afuse_oper = {
 	.chmod = afuse_chmod,
 	.chown = afuse_chown,
 	.truncate = afuse_truncate,
-	.utime = afuse_utime,
+	.utimens = afuse_utimens,
 	.open = afuse_open,
 	.read = afuse_read,
 	.write = afuse_write,
@@ -1755,8 +1749,6 @@ static struct fuse_operations afuse_oper = {
 #if FUSE_VERSION >= 25
 	.access = afuse_access,
 	.create = afuse_create,
-	.ftruncate = afuse_ftruncate,
-	.fgetattr = afuse_fgetattr,
 #endif
 	.destroy = afuse_destroy,
 #ifdef HAVE_SETXATTR
@@ -1847,7 +1839,7 @@ static int afuse_opt_proc(void *data, const char *arg, int key,
 	case KEY_HELP:
 		usage(outargs->argv[0]);
 		fuse_opt_add_arg(outargs, "-ho");
-		fuse_main(outargs->argc, outargs->argv, &afuse_oper);
+		fuse_main(outargs->argc, outargs->argv, &afuse_oper, NULL);
 		exit(1);
 
 	case KEY_FLUSHWRITES:
@@ -1913,7 +1905,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "(Un)Mount command templates missing.\n\n");
 		usage(argv[0]);
 		fuse_opt_add_arg(&args, "-ho");
-		fuse_main(args.argc, args.argv, &afuse_oper);
+		fuse_main(args.argc, args.argv, &afuse_oper, NULL);
 
 		return 1;
 	}
@@ -1940,5 +1932,5 @@ int main(int argc, char *argv[])
 	umask(0);
 
 	// !!FIXME!! death by signal doesn't unmount fs
-	return fuse_main(args.argc, args.argv, &afuse_oper);
+	return fuse_main(args.argc, args.argv, &afuse_oper, NULL);
 }
