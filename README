@@ -54,6 +54,12 @@ For this example to work, the sshfs invocation must not require user
 interactivity (i.e.  asking for a password). So you probably want to be
 using something like ssh-agent.
 
+You can use afuse with NFS with the following command:
+	
+	afuse -o mount_template="mount -t nfs %r %m" \
+      	-o unmount_template="umount %m" \
+      	~/afuse_mount/
+
 Alternatively, if want interactivity, add -f to the afuse invocation.
 
 
